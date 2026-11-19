@@ -98,3 +98,10 @@ For this workload Terni first won at the 10,000-gate sample. At one million gate
 The 100,000-gate rendering benchmark under Xvfb with llvmpipe OpenGL measured 21.7 FPS and 319.6 TPS with Classic, and 22.6 FPS and 695.5 TPS with Terni on the RTX 4070 Ti.
 
 The bridge and differential harness have been exercised on Linux hardware Vulkan and Mesa software Vulkan. The Windows build recipe and mobile builds remain unverified. Sequential and external-IO transitions execute on the CPU, and hybrid circuits can spend most of a tick in ordered host replay. Current performance work covers combinational offload and bulk transfers. Persistent GPU-side state across ticks, incremental topology buffers, and an independent optimized CPU benchmark remain open.
+
+## Continuous integration and releases
+
+Desktop CI runs the parity harness with software Vulkan on Linux x64 and Windows
+x64 and builds the desktop distribution on each platform. Push a new `v*` tag
+(for example, `v0.1.0`) to test and publish both platform ZIPs and their SHA-256
+checksums. Each ZIP includes the desktop JAR, platform JNI library and licenses.

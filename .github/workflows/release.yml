@@ -1,0 +1,40 @@
+name: Tagged release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    uses: ./.github/workflows/ci.yml
+    with:
+      package: true
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: SlopicDraw-*-x64
+          merge-multiple: true
+          path: release
+      - name: Publish the tested archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd release
+          sha256sum SlopicDraw-linux-x64.zip SlopicDraw-windows-x64.zip > SHA256SUMS.txt
+          gh release create --verify-tag --generate-notes -- "$TAG" \
+            SlopicDraw-linux-x64.zip SlopicDraw-windows-x64.zip SHA256SUMS.txt
