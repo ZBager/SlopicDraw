@@ -105,3 +105,5 @@ Desktop CI runs the parity harness with software Vulkan on Linux x64 and Windows
 x64 and builds the desktop distribution on each platform. Push a new `v*` tag
 (for example, `v0.1.0`) to test and publish both platform ZIPs and their SHA-256
 checksums. Each ZIP includes the desktop JAR, platform JNI library and licenses.
+Run Desktop CI manually with its package option to build the same archives as
+workflow artifacts without publishing a release.

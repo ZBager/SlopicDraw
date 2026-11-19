@@ -5,6 +5,11 @@ on:
     branches: ['**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      package:
+        description: Build downloadable ZIPs without publishing a release
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       package:
@@ -30,10 +35,10 @@ jobs:
             runner: windows-2022
             library: build/terni/Release/logicdraw_terni.dll
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6.3.0
         with:
           distribution: temurin
           java-version: '8'
@@ -54,6 +59,7 @@ jobs:
           vulkan_version: '1.4.363.1'
           install_runtime: true
           install_lavapipe: true
+          cache: true
           github_token: ${{ github.token }}
 
       - name: Build JNI bridge and distribution, then compare Classic and Terni
@@ -102,7 +108,7 @@ jobs:
           INSTRUCTIONS
           cmake -E chdir package cmake -E tar cf "../SlopicDraw-$PLATFORM-x64.zip" --format=zip -- .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         if: inputs.package
         with:
           name: SlopicDraw-${{ matrix.platform }}-x64
