@@ -12,7 +12,7 @@ import me.wieku.circuits.save.SaveManager
 import me.wieku.circuits.save.Saveable
 import me.wieku.circuits.world.ClassicWorld
 
-abstract class BusTap(position: Vector2i, private val feedsBus: Boolean) :
+abstract class BusTap(position: Vector2i, val feedsBus: Boolean) :
 	BasicElement(position), ITickable, Saveable, Copyable {
 	var bit = 0
 		set(value) {
@@ -22,6 +22,9 @@ abstract class BusTap(position: Vector2i, private val feedsBus: Boolean) :
 
 	private var signal: BusSignal? = null
 	private val wires = ArrayList<State>(3)
+
+	fun simulationBus() = signal
+	fun simulationWires(): List<State> = wires
 
 	internal fun connect(world: IWorld) {
 		signal = null

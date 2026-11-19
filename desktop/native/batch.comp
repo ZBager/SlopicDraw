@@ -1,15 +1,24 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #include "terni/compute.glsl"
+#include "timer.glsl"
 
 // Each workgroup owns every state it reads or writes. Keep the limits in sync with the bridge.
 layout(constant_id = 2) const uint gateCount = 0;
 layout(constant_id = 3) const uint stateCount = 0;
 layout(constant_id = 4) const uint partitioned = 0;
+layout(constant_id = 5) const uint extended = 0;
+layout(constant_id = 6) const uint inputCount = 0;
+layout(constant_id = 7) const uint busCount = 0;
+layout(constant_id = 8) const uint programmerCount = 0;
 layout(std430, binding = 0) readonly buffer GateRows { int gates[]; };
 layout(std430, binding = 1) readonly buffer InputPins { int pins[]; };
 layout(std430, binding = 2) readonly buffer Destinations { int writes[]; };
 layout(std430, binding = 3) readonly buffer Initial { uint initial[]; };
+#include "programmer.glsl"
+#ifdef HOST_EVENTS
+#include "ram.glsl"
+#endif
 layout(std430, binding = 4) readonly buffer Schedule { uint schedule[]; };
 layout(std430, binding = 5) buffer Result { uint results[]; };
 
@@ -23,7 +32,21 @@ shared uint current[2048];
 shared uint flags[2048];
 
 uint level(int index) {
-    return index < 0 ? 0u : current[index];
+    return index < 0 ? 0u : (extended != 0 ? current[index] & 1u : current[index]);
+}
+
+bool readPin(ivec4 src, uint inverted, int indicator) {
+    uint signal = level(src.x) | level(src.y) | level(src.z) | level(src.w);
+    bool high = (signal ^ inverted) != 0;
+    atomicOr(flags[indicator], 2u | uint(high));
+    return high;
+}
+
+bool readAny(ivec4 sources[4], uvec4 inverted, ivec4 indicators, uint first, uint end) {
+    for (uint pin = first; pin < end && indicators[pin] >= 0; ++pin) {
+        if (readPin(sources[pin], inverted[pin], indicators[pin])) return true;
+    }
+    return false;
 }
 
 void main() {
@@ -46,9 +69,34 @@ void main() {
     ivec4 sinks = ivec4(-1);
     uvec4 inverted = uvec4(0);
     int self = -1;
+    ivec4 carrySinks = ivec4(-1);
+    int carrySelf = -1;
+    uint busMask = 0;
+    int programSlot = -1;
+    uint programData = 0;
+    uint programBytes = 0;
+#ifdef HOST_EVENTS
+    uint eventParameter = 0;
+#endif
     if (lane < groupGates) {
         op = gates[base];
         self = localSlot(writes[base]);
+        if (extended != 0 && (op == 6 || (op >= 19 && op < 26))) {
+            uint carry = inputCount + gateCount * 5 + base;
+            carrySelf = localSlot(writes[carry]);
+            carrySinks = ivec4(localSlot(writes[carry + 1]), localSlot(writes[carry + 2]),
+                               localSlot(writes[carry + 3]), localSlot(writes[carry + 4]));
+            uint param = stateCount + inputCount + (base / 5) * 3;
+            if (op == 19 || op == 20) busMask = 1u << initial[param];
+            if (op >= 21 && op < 26) {
+                programData = initial[param];
+                programBytes = initial[param + 1];
+                programSlot = localSlot(int(initial[param + 2]));
+            }
+        }
+#ifdef HOST_EVENTS
+        if (op >= 26 && op != 32) eventParameter = initial[stateCount + inputCount + (base / 5) * 3];
+#endif
         for (uint pin = 0; pin < 4; ++pin) {
             int inputRow = gates[base + 1 + pin];
             sinks[pin] = localSlot(writes[base + 1 + pin]);
@@ -61,11 +109,17 @@ void main() {
         }
     }
 
+    // The host packs current, pending and driven bits below the private runtime fields.
     bool resume = (schedule[0] & 0x10000u) != 0;
     for (uint i = lane; i < groupStates; i += gl_WorkGroupSize.x) {
         uint state = partitioned != 0 ? groups[stateStart + i] : i;
         uint value = initial[state];
-        current[i] = resume ? results[state] : value & 1u;
+        current[i] = resume ? results[state] : (value & 1u) | (extended != 0 ? (value >> 3) << 1 : 0u);
+        if ((busCount != 0 || programmerCount != 0) && state >= stateCount - programmerCount - busCount) {
+            current[i] = resume ? results[state] : value;
+            flags[i] = 0;
+            continue;
+        }
         // An external write before a fresh batch may have already marked this wire driven.
         flags[i] = !resume && (value & 4u) != 0 ? 2u | ((value >> 1) & 1u) : 0u;
     }
@@ -83,32 +137,111 @@ void main() {
             }
         }
         if (self >= 0) {
-            bool all = op < 2;
-            bool parity = op >= 4;
-            bool value = all && indicators[0] >= 0;
-            for (uint pin = 0; pin < 4; ++pin) {
-                int indicator = indicators[pin];
-                if (indicator < 0 || (!parity && value != all)) break;
-                ivec4 src = sources[pin];
-                uint high = level(src.x) | level(src.y) | level(src.z) | level(src.w);
-                bool pinHigh = (high ^ inverted[pin]) != 0;
-                atomicOr(flags[indicator], 2u | uint(pinHigh));
-                value = parity ? value != pinHigh : pinHigh;
-            }
+            bool carry = indicators[0] >= 0;
+            uint driven;
+            if (extended != 0 && op == 19) {
+                if (carrySelf >= 0) {
+                    uint high = level(carrySinks.x) | level(carrySinks.y) |
+                                level(carrySinks.z) | level(carrySinks.w);
+                    atomicOr(flags[carrySelf], busMask | (high != 0 ? busMask << 8 : 0u));
+                }
+                driven = 0;
+            } else if (extended != 0 && op == 20) {
+                bool high = carrySelf >= 0 && (current[carrySelf] & busMask) != 0;
+                driven = 2u | uint(high);
+            } else if (extended != 0 && op >= 7) {
+                bool value = (current[self] & 1u) != 0;
+                if (tick == 0 && !resume) {
+                    uint state = partitioned != 0 ? groups[stateStart + uint(self)] : uint(self);
+                    value = (initial[state] & 2u) != 0;
+                }
+                uint state = current[self];
+                uint next;
+                if (op == 32) {
+                    bool locked = readAny(sources, inverted, indicators, 0, 4);
+                    next = locked ? 2u : uint(value);
+                } else
+#ifdef HOST_EVENTS
+                if (op == 33) {
+                    bool high = readAny(sources, inverted, indicators, 0, 4);
+                    next = uint(stepSerial(eventParameter, high));
+                } else if (op == 31) {
+                    bool high = readAny(sources, inverted, indicators, 0, 4);
+                    next = stepStop(high, state, value, eventParameter != 0);
+                } else if (op >= 26) {
+                    uint controllerCount = uint(op - 26);
+                    bool control = readAny(sources, inverted, indicators, 0, controllerCount);
+                    bool high = readAny(sources, inverted, indicators, controllerCount, 4);
+                    next = uint(stepRam(eventParameter, control, high, value));
+                } else
+#endif
+                if (op >= 21 && op < 26) {
+                    uint controllerCount = uint(op - 21);
+                    bool reset = readAny(sources, inverted, indicators, 0, controllerCount);
+                    bool clock = readAny(sources, inverted, indicators, controllerCount, 4);
+                    int index = int(current[programSlot]);
+                    next = stepProgrammer(reset, clock, state, value, programData, programBytes, index);
+                    current[programSlot] = uint(index);
+                    carry = index >= int(programBytes * 8u) - 1;
+                } else if (op >= 17) {
+                    bool high = readAny(sources, inverted, indicators, 0, 4);
+                    uint param = stateCount + inputCount + (base / 5) * 3;
+                    next = tickTimer(op, high, state, value, int(initial[param]), int(initial[param + 1]));
+                } else {
+                    bool toggle = op >= 12;
+                    uint controllerCount = uint(op - (toggle ? 12 : 7));
+                    bool data = toggle && readAny(sources, inverted, indicators, controllerCount, 4);
+                    bool control = readAny(sources, inverted, indicators, 0, controllerCount);
+                    bool armed = (state & 2u) != 0;
+                    if (toggle) {
+                        if (control) value = false;
+                        else if (data && armed) value = (state & 1u) == 0;
+                    } else if (control && armed) {
+                        value = readAny(sources, inverted, indicators, controllerCount, 4);
+                    }
+                    next = (uint(!(toggle ? data : control)) << 1) | uint(value);
+                }
+                driven = 2u | (next & 1u);
+                atomicOr(flags[self], driven | ((next >> 1) << 2));
+            } else {
+                bool all = op < 2;
+                bool parity = op >= 4;
+                bool value = all && indicators[0] >= 0;
+                for (uint pin = 0; pin < 4; ++pin) {
+                    int indicator = indicators[pin];
+                    if (indicator < 0 || (!parity && value != all)) break;
+                    bool pinHigh = readPin(sources[pin], inverted[pin], indicator);
+                    if (extended != 0 && op == 6) carry = carry && pinHigh;
+                    value = parity ? value != pinHigh : pinHigh;
+                }
 
-            uint driven = 2u | uint(value != ((op & 1) != 0));
-            atomicOr(flags[self], driven);
+                driven = 2u | uint(value != ((op & 1) != 0));
+                atomicOr(flags[self], driven);
+            }
+            if (extended != 0 && carrySelf >= 0 && (op == 6 || (op >= 21 && op < 26))) {
+                uint carryDriven = 2u | uint(carry);
+                atomicOr(flags[carrySelf], carryDriven);
+                for (uint pin = 0; pin < 4; ++pin) {
+                    if (carrySinks[pin] >= 0) atomicOr(flags[carrySinks[pin]], carryDriven);
+                }
+            }
             for (uint pin = 0; pin < 4; ++pin) {
                 if (sinks[pin] >= 0) atomicOr(flags[sinks[pin]], driven);
             }
         }
+#ifdef HOST_EVENTS
+        memoryBarrierBuffer();
+#endif
         workgroup_sync();
 
         for (uint i = lane; i < groupStates; i += gl_WorkGroupSize.x) {
             uint writesThisTick = flags[i];
-            if (writesThisTick != 0) current[i] = writesThisTick & 1u;
+            uint state = partitioned != 0 ? groups[stateStart + i] : i;
+            if (programmerCount != 0 && state >= stateCount - programmerCount) continue;
+            if (busCount != 0 && state >= stateCount - programmerCount - busCount) {
+                current[i] = (current[i] & ~(writesThisTick & 255u)) | (writesThisTick >> 8);
+            } else if (writesThisTick != 0) current[i] = (writesThisTick & 1u) | (extended != 0 ? (writesThisTick >> 2) << 1 : 0u);
             else if (tick == 0 && !resume) {
-                uint state = partitioned != 0 ? groups[stateStart + i] : i;
                 current[i] = (initial[state] >> 1) & 1u;
             }
             flags[i] = 0;

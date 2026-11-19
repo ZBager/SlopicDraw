@@ -14,6 +14,18 @@ class SerialIOGate(pos: Vector2i): SaveableGate(pos) {
     private var n = 0
     private var b = 0
 
+    fun packSimulationState(words: IntArray, offset: Int) {
+        words[offset] = n
+        words[offset + 1] = b
+        words[offset + 2] = action.ordinal
+    }
+
+    fun restoreSimulationState(words: IntArray, offset: Int) {
+        n = words[offset]
+        b = words[offset + 1]
+        action = State.values()[words[offset + 2]]
+    }
+
     override fun update(tick: Long) {
         val ins = inputs.isActive()
         state!!.setActiveU(false)

@@ -9,6 +9,9 @@ abstract class BasicOutput(pos: Vector2i): BasicElement(pos) {
 
 	protected val outputs = Outputs()
 
+	fun simulationOutputCount() = outputs.size
+	fun simulationOutput(index: Int) = outputs.array[index]!!
+
 	override fun onPlace(world: IWorld) {
 		updateIO(world)
 	}

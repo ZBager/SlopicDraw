@@ -11,11 +11,17 @@ import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.elements.io.Controller
 import java.util.*
 
-class DelayGate(pos: Vector2i): SaveableGate(pos) {
+class DelayGate(pos: Vector2i): SaveableGate(pos), TimedGate {
 
 	internal var delay = 500
 
 	private var counter = 0
+
+	override var simulationCounter: Int
+		get() = counter
+		set(value) { counter = value }
+	override val simulationLimit get() = delay
+	override val simulationOnTicks get() = 0
 
 	override fun update(tick: Long) {
 		var calc = inputs.isActive()

@@ -19,6 +19,7 @@ class ProgramInputGate(pos: Vector2i) : SaveableGate(pos) {
 		set(value) {
 			field = value
 			index = -1
+			simulationProgramRevision++
 		}
 
 	private var index = -1
@@ -26,6 +27,27 @@ class ProgramInputGate(pos: Vector2i) : SaveableGate(pos) {
 	private var toUpdate = true
 	private var toUpdate2 = true
 	protected val controllers = Inputs()
+
+	var simulationProgramRevision = 0L
+		private set
+
+	fun replaceProgram(data: ByteArray) {
+		bytes = data.copyOf()
+	}
+
+	fun simulationCarryOutput() = carryOut
+	fun simulationControllerCount() = controllers.size
+	fun simulationController(pin: Int) = controllers.array[pin]!!
+	fun simulationByteCount() = bytes.size
+	fun simulationByte(index: Int) = bytes[index]
+	fun simulationIndex() = index
+	fun simulationLatchBits() = (if (toUpdate) 1 else 0) or (if (toUpdate2) 2 else 0)
+
+	fun restoreSimulationState(index: Int, latches: Int) {
+		this.index = index
+		toUpdate = latches and 1 != 0
+		toUpdate2 = latches and 2 != 0
+	}
 
 	override fun update(tick: Long) {
 		var calc = controllers.isActive()

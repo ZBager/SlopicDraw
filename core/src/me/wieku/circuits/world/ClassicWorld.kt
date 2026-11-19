@@ -73,6 +73,20 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 	val eventBus = EventBus("buttons")
 
 	var clock: AsyncClock? = null
+		set(value) = synchronized(this) {
+			if (field !== value) {
+				synchronizeSimulation()
+				field = value
+			}
+		}
+	private var stopGeneration = 0L
+
+	internal fun stopFromGate(): Boolean {
+		val attached = clock ?: return false
+		attached.stop()
+		stopGeneration++
+		return true
+	}
 
 	var entities = 0
 	get() = tickables.currentElements
@@ -99,7 +113,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 		if (simulationClosed) return
 		synchronizeSimulation()
 		updateTasks()
-		if (!buses.hasElements && simulation.evaluateBatch(count, topology, tickables, manager, drives)) {
+		if (simulation.evaluateBatch(count, topology, tickables, manager, drives)) {
 			manager.swap()
 			return
 		}
@@ -120,8 +134,8 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 		updateTasks()
 		val previous = lastPreview
 		val publish = previous == null || now - previous >= 1_000_000_000L / previewHz
-		val burst = if (buses.hasElements) 1 else minOf(count, simulation.previewBatchSize(topology, tickables))
-		if (!buses.hasElements && simulation.evaluateBatch(burst, topology, tickables, manager, emptyList(), publish)) {
+		val burst = minOf(count, simulation.previewBatchSize(topology, tickables))
+		if (simulation.evaluateBatch(burst, topology, tickables, manager, emptyList(), publish)) {
 			if (publish) {
 				manager.swap()
 				unpublishedTicks = 0
@@ -136,7 +150,8 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 
 		synchronizeSimulation()
 		var completed = 0
-		while (completed < count && running()) {
+		val generation = stopGeneration
+		while (completed < count && running() && stopGeneration == generation) {
 			evaluateTick(tick + completed)
 			completed++
 		}
@@ -148,10 +163,11 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 		if (unpublishedTicks == 0) return
 		if (simulation.synchronizeBatch(manager)) manager.swap()
 		else {
-			// Only pure combinational ticks with no external writes are left unpublished.
-			// Rebuild from the last host checkpoint if the GPU snapshot is unavailable.
+			// Unpublished bursts have no external writes or side effects. Rebuild from
+			// the last host checkpoint, including gate runtime fields, if readback fails.
 			repeat(unpublishedTicks) { offset ->
 				ClassicSimulation.evaluate(unpublishedFrom + offset, topology, tickables, manager)
+				buses.commit()
 				manager.swap()
 			}
 		}

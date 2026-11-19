@@ -2,8 +2,12 @@ package me.wieku.circuits.desktop.simulation
 
 import me.wieku.circuits.api.math.Axis
 import me.wieku.circuits.api.math.Vector2i
+import me.wieku.circuits.api.world.clock.AsyncClock
+import me.wieku.circuits.api.world.clock.Updatable
 import me.wieku.circuits.save.SaveManagers
 import me.wieku.circuits.world.ClassicWorld
+import me.wieku.circuits.world.elements.gates.ProgramInputGate
+import me.wieku.circuits.world.elements.gates.DelayGate
 import me.wieku.circuits.world.simulation.BatchSignalDrive
 import me.wieku.circuits.world.simulation.ClassicSimulation
 import me.wieku.circuits.world.simulation.SimulationBackend
@@ -12,7 +16,7 @@ import java.util.Locale
 // A NOR feeds its own input through one electrical net. A neighboring OR drives low
 // on the same net, so each batch exercises both feedback and multiple drivers.
 private fun feedbackBoard(gates: Int, backend: SimulationBackend, active: Boolean = true,
-	connected: Boolean = false): ClassicWorld {
+	connected: Boolean = false, sequential: Boolean = false, stop: Boolean = false, hostIo: Boolean = false): ClassicWorld {
 	require(gates > 0 && gates % 2 == 0)
 	val columns = minOf(500, gates / 2)
 	val rows = (gates / 2 + columns - 1) / columns
@@ -24,7 +28,19 @@ private fun feedbackBoard(gates: Int, backend: SimulationBackend, active: Boolea
 		world.placeElement(Vector2i(x + 2, y + 1), "input")
 		world.placeElement(Vector2i(x + 1, y + 2), "wire")
 		world.placeElement(Vector2i(x + 2, y + 2), "wire")
-		world.placeElement(Vector2i(x + 3, y + 2), "or")
+		if (sequential) {
+			world.placeElement(Vector2i(x + 2, y + 3), "input")
+			world.placeElement(Vector2i(x + 3, y + 3), "tflipflop")
+			world.placeElement(Vector2i(x + 4, y + 3), "wire")
+		} else {
+			val gate = when {
+				stop -> "debug_stop"
+				hostIo && pair % 2 == 0 -> "key"
+				hostIo -> "serialio"
+				else -> "or"
+			}
+			world.placeElement(Vector2i(x + 3, y + 2), gate)
+		}
 		if (pair % 4096 == 4095) world.updateTasks()
 	}
 	if (connected) {
@@ -39,6 +55,9 @@ private fun feedbackBoard(gates: Int, backend: SimulationBackend, active: Boolea
 		}
 	}
 	world.updateTasks()
+	if (stop) world.clock = AsyncClock(object : Updatable.ByTick {
+		override fun update(value: Long) = world.update(value)
+	}, 60)
 	return world
 }
 
@@ -78,6 +97,9 @@ internal fun verifyBatches(software: Boolean) {
 		// Replacing a gate invalidates both native plans and forces ordered mixed execution.
 		for (world in listOf(classic, terni)) {
 			world.placeElement(Vector2i(1, 1), "delay")
+			world.updateTasks()
+			val delay = world[1, 1] as DelayGate
+			delay.pasteData(delay.copyData().apply { put("delay", Int.MAX_VALUE) })
 			world.updateBatch(257, 16)
 		}
 		check(!terni.simulationStatus.contains("(batched)"))
@@ -167,14 +189,79 @@ internal fun benchmarkBatches(software: Boolean, samples: Int) {
 	))
 }
 
-internal fun benchmarkResident(sizes: List<Int>, software: Boolean, samples: Int, connected: Boolean) {
+internal fun programmerBusBoard(gates: Int, backend: SimulationBackend, active: Boolean): ClassicWorld {
+	val cells = gates / 4
+	val columns = minOf(200, cells)
+	val rows = (cells + columns - 1) / columns
+	val world = ClassicWorld(columns * 9, rows * 6, "Programmer and bus feedback", backend)
+	for (cell in 0 until cells) {
+		val x = cell % columns * 9
+		val y = cell / columns * 6
+		fun place(dx: Int, dy: Int, element: String) = world.placeElement(Vector2i(x + dx, y + dy), element)
+		place(1, 1, if (active) "nor" else "or")
+		place(0, 1, "input")
+		place(0, 2, "wire")
+		place(1, 2, "wire")
+		place(1, 3, "wire")
+		place(2, 3, "input")
+		place(3, 3, "programmer")
+		place(4, 3, "controller")
+		place(3, 4, "out")
+		place(4, 4, "wire")
+		place(3, 2, "wire")
+		place(3, 1, "bus_in")
+		place(4, 1, "bus")
+		place(5, 1, "bus")
+		place(6, 1, "bus_out")
+		place(7, 1, "wire")
+		if (cell % 4096 == 4095) world.updateTasks()
+	}
+	world.updateTasks()
+	val program = byteArrayOf(0xaa.toByte())
+	for (cell in 0 until cells) {
+		val x = cell % columns * 9
+		val y = cell / columns * 6
+		(world[x + 3, y + 3] as ProgramInputGate).replaceProgram(program)
+	}
+	return world
+}
+
+private fun ramFeedbackBoard(gates: Int, backend: SimulationBackend, active: Boolean): ClassicWorld {
+	val cells = gates / 2
+	val columns = minOf(500, cells)
+	val rows = (cells + columns - 1) / columns
+	val world = ClassicWorld(columns * 5, rows * 5, "RAM feedback", backend)
+	for (cell in 0 until cells) {
+		val x = cell % columns * 5
+		val y = cell / columns * 5
+		fun place(dx: Int, dy: Int, element: String) = world.placeElement(Vector2i(x + dx, y + dy), element)
+		place(1, 1, if (active) "nor" else "or")
+		place(0, 1, "input")
+		place(0, 2, "wire")
+		place(1, 2, "wire")
+		place(1, 3, "controller")
+		place(2, 3, "ram")
+		place(3, 3, "wire")
+		if (cell % 4096 == 4095) world.updateTasks()
+	}
+	world.updateTasks()
+	return world
+}
+
+internal fun benchmarkResident(sizes: List<Int>, software: Boolean, samples: Int, connected: Boolean,
+	sequential: Boolean, busProgrammer: Boolean, ram: Boolean, stop: Boolean, hostIo: Boolean) {
+	require(listOf(connected, sequential, busProgrammer, ram, stop, hostIo).count { it } <= 1)
 	require(sizes.isNotEmpty() && sizes.distinct().size == sizes.size)
 	for (gates in sizes) {
-		require(gates > 0 && gates % 2 == 0)
+		require(gates > 0 && gates % (if (busProgrammer) 4 else 2) == 0)
 		for (active in listOf(true, false)) {
 			for (accelerated in listOf(false, true)) {
 				val backend = if (accelerated) TerniSimulation(software) else ClassicSimulation
-				val world = feedbackBoard(gates, backend, active, connected)
+				val world = when {
+					busProgrammer -> programmerBusBoard(gates, backend, active)
+					ram -> ramFeedbackBoard(gates, backend, active)
+					else -> feedbackBoard(gates, backend, active, connected, sequential, stop, hostIo)
+				}
 				try {
 					world.previewHz = 60
 					val warmup = if (accelerated) 300 else if (gates <= 256) 50_000 else 30

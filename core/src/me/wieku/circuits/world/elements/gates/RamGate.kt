@@ -36,6 +36,42 @@ class RamGate(pos: Vector2i): SaveableGate(pos) {
 	private var cmdBuf: Long = 0L
 	private var read = 0
 
+	fun simulationControllerCount() = controllers.size
+	fun simulationController(pin: Int) = controllers.array[pin]!!
+	fun simulationMemorySize() = memory.size
+
+	// The native RAM arena stores the protocol header followed by four bytes per word.
+	fun packSimulationRam(arena: IntArray, offset: Int, capacity: Int): Boolean {
+		if ((chunkSize != 1 && chunkSize != 2 && chunkSize != 4) || baseAddr !in 0..Int.MAX_VALUE - 35) return false
+		arena[offset] = chunkSize
+		arena[offset + 1] = baseAddr
+		arena[offset + 2] = action.ordinal
+		arena[offset + 3] = cmdBuf.toInt()
+		arena[offset + 4] = (cmdBuf ushr 32).toInt()
+		arena[offset + 5] = read
+		arena[offset + 6] = memory.size
+		arena[offset + 7] = capacity
+		for (i in 0 until memory.size step 4) {
+			var word = 0
+			for (byte in 0 until minOf(4, memory.size - i)) {
+				word = word or ((memory[i + byte].toInt() and 255) shl (byte * 8))
+			}
+			arena[offset + 8 + i / 4] = word
+		}
+		return true
+	}
+
+	fun restoreSimulationRam(arena: IntArray, offset: Int) {
+		chunkSize = arena[offset]
+		baseAddr = arena[offset + 1]
+		action = State.values()[arena[offset + 2]]
+		cmdBuf = (arena[offset + 4].toLong() shl 32) or (arena[offset + 3].toLong() and 0xffffffffL)
+		read = arena[offset + 5]
+		val length = arena[offset + 6]
+		if (length != memory.size) memory = ByteArray(length)
+		for (i in memory.indices) memory[i] = (arena[offset + 8 + i / 4] ushr ((i % 4) * 8)).toByte()
+	}
+
 	override fun update(tick: Long) {
 		val ctl = controllers.isActive()
 		val ins = inputs.isActive()

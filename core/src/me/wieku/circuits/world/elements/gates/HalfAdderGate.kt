@@ -6,11 +6,12 @@ import me.wieku.circuits.api.element.BasicWire
 import me.wieku.circuits.api.math.Axis
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.world.IWorld
-import me.wieku.circuits.world.elements.io.Controller
 
 class HalfAdderGate(pos: Vector2i): SaveableGate(pos) {
 
 	private var carryOut: BasicOutput? = null
+
+	fun simulationCarryOutput() = carryOut
 
 	override fun update(tick: Long) {
 		val calcX = inputs.isXORActive()

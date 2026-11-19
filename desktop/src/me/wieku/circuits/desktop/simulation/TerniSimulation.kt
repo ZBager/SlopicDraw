@@ -1,14 +1,18 @@
 package me.wieku.circuits.desktop.simulation
 
 import me.wieku.circuits.api.collections.MappedArray
+import me.wieku.circuits.api.element.BasicInput
 import me.wieku.circuits.api.element.ITickable
 import me.wieku.circuits.api.math.Axis
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.state.State
 import me.wieku.circuits.api.state.StateManager
 import me.wieku.circuits.world.elements.gates.*
+import me.wieku.circuits.world.elements.bus.BusSignal
+import me.wieku.circuits.world.elements.bus.BusTap
 import me.wieku.circuits.world.elements.io.Controller
 import me.wieku.circuits.world.elements.io.Input
+import me.wieku.circuits.world.elements.io.Output
 import me.wieku.circuits.world.simulation.ClassicSimulation
 import me.wieku.circuits.world.simulation.BatchSignalDrive
 import me.wieku.circuits.world.simulation.SimulationBackend
@@ -25,11 +29,11 @@ internal object TerniNative {
 
 	external fun create(gates: IntArray, inputNets: IntArray, netCount: Int,
 		writes: IntArray, resultCount: Int, allowSoftware: Boolean): Long
-	external fun createResidentBatch(gates: IntArray, inputPins: IntArray, writes: IntArray,
-		stateCount: Int, partitions: IntArray, groups: Int, allowSoftware: Boolean): Long
-	external fun evaluateBatch(handle: Long, initial: IntArray, commands: IntArray, results: IntArray,
-		resume: Boolean, publish: Boolean): Double
-	external fun readBatch(handle: Long, results: IntArray)
+	external fun createResidentBatchV3(gates: IntArray, inputPins: IntArray, writes: IntArray,
+		stateCount: Int, partitions: IntArray, groups: Int, allowSoftware: Boolean, busCount: Int, programmerCount: Int, initialWords: Int, ramWords: Int): Long
+	external fun evaluateBatchV3(handle: Long, initial: IntArray, commands: IntArray, results: IntArray,
+		resume: Boolean, publish: Boolean, uploadWords: Int, ram: IntArray): Boolean
+	external fun readBatchV3(handle: Long, results: IntArray, ram: IntArray)
 	external fun describe(handle: Long): String
 	external fun report(handle: Long): String
 	external fun evaluate(handle: Long, signals: IntArray, results: IntArray, checkOrder: Boolean): Double
@@ -45,7 +49,7 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 	override var status = "Classic (Terni pending)"
 		private set
 
-	val nativeReport: String get() = circuit?.let {
+	val nativeReport: String get() = circuit?.takeIf { it.handle != 0L }?.let {
 		String.format(Locale.ROOT, "%.3f ms native initialization, %s", it.initializeMs, TerniNative.report(it.handle))
 	} ?: status
 
@@ -54,6 +58,7 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		if (failure == null) {
 			try {
 				compiled = prepare(topology, gates)
+				if (compiled?.handle == 0L) compiled = null
 				if (compiled != null) compiled.dispatch(states, checkOrder)
 			} catch (error: LinkageError) {
 				fail(error)
@@ -65,7 +70,10 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		}
 		// Only GPU setup and dispatch can fall back. Applying results may run user-visible
 		// side effects, so the Classic tick must never be retried after that starts.
-		if (compiled == null) ClassicSimulation.evaluate(tick, topology, gates, states)
+		if (compiled == null) {
+			ClassicSimulation.evaluate(tick, topology, gates, states)
+			if (circuit?.handle == 0L) status = "Classic (resident gates available for batches)"
+		}
 		else {
 			compiled.apply(tick, gates)
 			if (!compiled.reported || compiled.samples == 120) status = compiled.status()
@@ -104,7 +112,7 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		}
 		if (!result) return false
 		if (publish) batch.apply(states)
-		status = compiled.batchStatus
+		status = batch.status
 		compiled.reported = false
 		compiled.resetTiming()
 		return true
@@ -142,29 +150,38 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 	override fun close() {
 		circuit?.let {
 			it.batch?.close()
-			TerniNative.destroy(it.handle)
+			if (it.handle != 0L) TerniNative.destroy(it.handle)
 		}
 		circuit = null
 		revision = -1L
 		status = if (failure == null) "Classic (Terni pending)" else "Classic (Terni fallback: $failure)"
 	}
 
-	private fun compile(gates: MappedArray<Vector2i, ITickable>): Circuit? {
-		val accelerated = ArrayList<SaveableGate>()
+	private class Topology(val gates: List<ITickable>, val slots: List<Int>, val rows: IntArray,
+		val terminals: Array<Input>, val inputNets: IntArray, val sampled: IntArray)
+
+	private fun topology(gates: MappedArray<Vector2i, ITickable>, resident: Boolean): Topology {
+		val accelerated = ArrayList<ITickable>()
 		val slots = ArrayList<Int>()
 		val inputRows = ArrayList<Input>()
 		val inputIndices = IdentityHashMap<Input, Int>()
 		for (slot in 0 until gates.size) {
 			val gate = gates[slot]
-			if (opcode(gate) < 0) continue
+			if (opcode(gate, resident) < 0) continue
+			if (gate is BusTap) {
+				accelerated.add(gate)
+				slots.add(slot)
+				continue
+			}
 			gate as SaveableGate
+			val pinCount = simulationInputCount(gate)
 			// The stock Input and Controller share the exact same read implementation.
-			if ((0 until gate.simulationInputCount()).any {
-				val input = gate.simulationInput(it)
-				input.javaClass != Input::class.java && input !is Controller
+			if ((0 until pinCount).any {
+				val input = simulationInput(gate, it)
+				input.javaClass != Input::class.java && input.javaClass != Controller::class.java
 			}) continue
-			for (i in 0 until gate.simulationInputCount()) {
-				val input = gate.simulationInput(i) as Input
+			for (pin in 0 until pinCount) {
+				val input = simulationInput(gate, pin) as Input
 				if (!inputIndices.containsKey(input)) {
 					inputIndices[input] = inputRows.size
 					inputRows.add(input)
@@ -173,11 +190,6 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 			accelerated.add(gate)
 			slots.add(slot)
 		}
-		if (accelerated.isEmpty()) {
-			status = "Classic (no Terni-compatible gates)"
-			return null
-		}
-
 		val netSlots = LinkedHashMap<Int, Int>()
 		val inputNets = IntArray(inputRows.size * 4)
 		for ((row, input) in inputRows.withIndex()) {
@@ -189,27 +201,69 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 
 		val rows = IntArray(accelerated.size * 5) { -1 }
 		for ((row, gate) in accelerated.withIndex()) {
-			rows[row * 5] = opcode(gate)
-			for (pin in 0 until gate.simulationInputCount()) {
-				rows[row * 5 + 1 + pin] = inputIndices[gate.simulationInput(pin) as Input]!!
+			rows[row * 5] = opcode(gate, resident)
+			if (gate !is SaveableGate) continue
+			for (pin in 0 until simulationInputCount(gate)) {
+				rows[row * 5 + 1 + pin] = inputIndices[simulationInput(gate, pin)]!!
 			}
 		}
+		return Topology(accelerated, slots, rows, inputRows.toTypedArray(), inputNets, netSlots.keys.toIntArray())
+	}
 
-		val reductions = if (accelerated.size == gates.currentElements) reductions(accelerated, inputRows) else null
-		val sampled = netSlots.keys.toIntArray()
-		val terminals = inputRows.toTypedArray()
-		val batch = if (reductions != null)
-			BatchPlan.create(rows, inputNets, reductions, sampled, terminals) else null
+	private fun controllerCount(gate: SaveableGate): Int = when (gate) {
+		is ClockedGate -> gate.simulationControllerCount()
+		is ProgramInputGate -> gate.simulationControllerCount()
+		is RamGate -> gate.simulationControllerCount()
+		else -> 0
+	}
+
+	private fun simulationInputCount(gate: SaveableGate) = gate.simulationInputCount() + controllerCount(gate)
+
+	private fun simulationInput(gate: SaveableGate, pin: Int): BasicInput {
+		val controllers = controllerCount(gate)
+		if (pin >= controllers) return gate.simulationInput(pin - controllers)
+		return when (gate) {
+			is ClockedGate -> gate.simulationController(pin)
+			is ProgramInputGate -> gate.simulationController(pin)
+			is RamGate -> gate.simulationController(pin)
+			else -> error("Gate has no controllers")
+		}
+	}
+
+	private fun compile(gates: MappedArray<Vector2i, ITickable>): Circuit? {
+		val basic = topology(gates, false)
+		val reductions = if (basic.gates.isNotEmpty() && basic.gates.size == gates.currentElements)
+			reductions(basic, false) else null
+		val batch = when {
+			reductions != null -> BatchPlan.create(basic, reductions)
+			(0 until gates.size).any { opcode(gates[it], true) > 5 } -> {
+				val resident = topology(gates, true)
+				if (resident.gates.size == gates.currentElements)
+					reductions(resident, true)?.let { BatchPlan.create(resident, it) }
+				else null
+			}
+			else -> null
+		}
+		val accelerated = basic.gates
+		if (accelerated.isEmpty()) {
+			status = if (batch == null) "Classic (no Terni-compatible gates)" else "Classic (resident gates available for batches)"
+			if (batch == null) return null
+			TerniNative.load()
+			return Circuit(0, "", 0.0, batch.gateCount, emptyArray(), IntArray(0),
+				emptyArray(), IntArray(0), null, 0, batch)
+		}
+		val sampled = basic.sampled
+		val terminals = basic.terminals
 		val start = System.nanoTime()
 		TerniNative.load()
-		val handle = TerniNative.create(rows, inputNets, netSlots.size + 1,
+		val handle = TerniNative.create(basic.rows, basic.inputNets, sampled.size + 1,
 			reductions?.writes ?: IntArray(0), reductions?.states?.size ?: accelerated.size, allowSoftware)
 		try {
 			return Circuit(handle, TerniNative.describe(handle), (System.nanoTime() - start) / 1_000_000.0,
 				accelerated.size,
-				if (reductions == null) accelerated.toTypedArray() else emptyArray(),
-				if (reductions == null) slots.toIntArray() else IntArray(0),
-				terminals, sampled, reductions?.states, reductions?.privateCount ?: 0, batch)
+				if (reductions == null) accelerated.map { it as SaveableGate }.toTypedArray() else emptyArray(),
+				if (reductions == null) basic.slots.toIntArray() else IntArray(0),
+				terminals, sampled, reductions?.states?.map { it!! }?.toTypedArray(), reductions?.privateCount ?: 0, batch)
 		} catch (error: Throwable) {
 			TerniNative.destroy(handle)
 			throw error
@@ -218,10 +272,17 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 
 	// Direct reduction is valid when every tickable is compiled and private state
 	// does not alias another writer. Unusual saved state aliasing uses ordered replay.
-	private fun reductions(gates: List<SaveableGate>, inputs: List<Input>): Reductions? {
-		val privateStates = ArrayList<State>()
+	private fun reductions(topology: Topology, extended: Boolean): Reductions? {
+		val gates = topology.gates
+		val inputs = topology.terminals
+		val privateStates = ArrayList<State?>()
 		val ids = HashSet<Int>()
 		for (gate in gates) {
+			if (gate is BusTap) {
+				privateStates.add(null)
+				continue
+			}
+			gate as SaveableGate
 			val state = gate.getState(Axis.HORIZONTAL) ?: return null
 			if (!ids.add(state.id)) return null
 			privateStates.add(state)
@@ -231,17 +292,49 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 			if (!ids.add(state.id)) return null
 			privateStates.add(state)
 		}
+		val carrySlots = if (extended) IntArray(gates.size) { -1 } else IntArray(0)
+		for (row in carrySlots.indices) {
+			val gate = gates[row]
+			val output = carryOutput(gate) ?: continue
+			if (output.javaClass != Output::class.java) return null
+			val state = output.getState(Axis.HORIZONTAL) ?: return null
+			if (!ids.add(state.id)) return null
+			carrySlots[row] = privateStates.size
+			privateStates.add(state)
+		}
+		if (extended && topology.sampled.any { it in ids }) return null
 		val nets = LinkedHashMap<Int, Int>()
 		val states = ArrayList(privateStates)
-		val writes = IntArray(gates.size * 5 + inputs.size) { -1 }
+		val extraStart = gates.size * 5 + inputs.size
+		val writes = IntArray(extraStart + if (extended) gates.size * 5 else 0) { -1 }
+		fun netSlot(state: State): Int = nets.getOrPut(state.id) {
+			states.add(state)
+			states.size - 1
+		}
 		for ((row, gate) in gates.withIndex()) {
 			writes[row * 5] = row
+			if (gate is BusTap) {
+				for ((pin, state) in gate.simulationWires().withIndex()) {
+					if (state.id in ids) return null
+					val base = if (gate.feedsBus) extraStart + row * 5 else row * 5
+					writes[base + 1 + pin] = netSlot(state)
+				}
+				continue
+			}
+			gate as SaveableGate
 			for (pin in 0 until gate.simulationOutputCount()) {
 				val state = gate.simulationOutput(pin)
 				if (state.id in ids) return null
-				writes[row * 5 + 1 + pin] = nets.getOrPut(state.id) {
-					states.add(state)
-					states.size - 1
+				writes[row * 5 + 1 + pin] = netSlot(state)
+			}
+			if (extended && carrySlots[row] >= 0) {
+				val output = carryOutput(gate)!!
+				val base = extraStart + row * 5
+				writes[base] = carrySlots[row]
+				for (pin in 0 until output.simulationOutputCount()) {
+					val state = output.simulationOutput(pin)
+					if (state.id in ids) return null
+					writes[base + 1 + pin] = netSlot(state)
 				}
 			}
 		}
@@ -249,13 +342,26 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		return Reductions(writes, states.toTypedArray(), privateStates.size)
 	}
 
-	private class Reductions(val writes: IntArray, val states: Array<State>, val privateCount: Int)
+	private fun carryOutput(gate: ITickable) = when (gate) {
+		is HalfAdderGate -> gate.simulationCarryOutput()
+		is ProgramInputGate -> gate.simulationCarryOutput()
+		else -> null
+	}
+
+	private class Reductions(val writes: IntArray, val states: Array<State?>, val privateCount: Int)
 
 	private class BatchPlan(private val gates: IntArray, private val pins: IntArray, private val writes: IntArray,
 		private val stateIds: IntArray, private val slots: Map<Int, Int>, private val inputs: Array<Input>,
-		private val privateCount: Int) {
-		private val wide = gates.size / 5 > 256 || stateIds.size > 2048
-		private val partitions = if (wide) BatchPartitions.build(gates, pins, writes, stateIds.size) else null
+		private val privateCount: Int, private val latches: Map<Int, ClockedGate>, private val timers: Map<Int, TimedGate>,
+		private val taps: Map<Int, BusTap>, private val buses: Array<BusSignal>,
+		private val programmers: Map<Int, ProgramInputGate>, private val hostState: ResidentHostState,
+		private val stops: Map<Int, StopGate>, private val keys: Map<Int, KeyGate>) {
+		val gateCount = gates.size / 5
+		private val programmerStart = stateIds.size + buses.size
+		private val stateCount = programmerStart + programmers.size
+		private val programmerSlots = programmers.keys.withIndex().associate { it.value to programmerStart + it.index }
+		private val wide = gateCount > 256 || stateCount > 2048
+		private val partitions = if (wide) BatchPartitions.build(gates, pins, writes, stateCount, programmerSlots) else null
 		val mode = when {
 			partitions != null -> ", partitioned"
 			wide -> ", multi-workgroup"
@@ -273,10 +379,18 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		private var tickNanos = 0.0
 		private var samples = 0
 		private var handle = 0L
+		var status = ""
+			private set
 		private var disabled = false
 		private var resident = false
-		private val initial = IntArray(stateIds.size + inputs.size)
-		private val results = IntArray(stateIds.size)
+		private val parameterStart = stateCount + inputs.size
+		private val programStart = parameterStart + if (timers.isEmpty() && taps.isEmpty() && programmers.isEmpty() && !hostState.isPresent)
+			0 else 3 * gateCount
+		private var initial = IntArray(programStart)
+		private var remainingProgramTicks = Int.MAX_VALUE
+		private val programRevisions = LongArray(programmers.size) { -1 }
+		private var programUploadPending = programmers.isNotEmpty()
+		private val results = IntArray(stateCount)
 		private val emptySchedule = IntArray(2)
 
 		fun dispatch(count: Int, states: StateManager, drives: List<BatchSignalDrive>,
@@ -304,19 +418,68 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 				records[2 + count] = written
 				records
 			}
-			if (handle == 0L) handle = TerniNative.createResidentBatch(gates, pins, writes, stateIds.size,
-				partitions?.layout ?: IntArray(0), partitions?.groups ?: 0, allowSoftware)
 			if (!resident) {
+				if (programmers.isNotEmpty() && !configureProgrammers(count)) return false
+				if (hostState.isPresent) {
+					val previousSize = hostState.words.size
+					val packed = hostState.pack(initial, parameterStart)
+					if (hostState.words.size != previousSize) close()
+					if (!packed) return false
+				}
 				for (i in stateIds.indices) {
 					val id = stateIds[i]
+					if (id < 0) continue
 					initial[i] = (if (states[id]) 1 else 0) or
 						(if (states.getDirty(id)) 2 else 0) or
 						(if (i >= privateCount && states.used[id] > 0) 4 else 0)
 				}
-				for (i in inputs.indices) initial[stateIds.size + i] = if (inputs[i].inverted) 1 else 0
+				for ((row, gate) in timers) {
+					val limit = gate.simulationLimit
+					val counter = gate.simulationCounter
+					// The staged driver word reserves five low bits for signal metadata.
+					if (limit !in 0..0x07ffffff || counter !in 0..0x07ffffff) return false
+					val self = writes[row * 5]
+					initial[self] = initial[self] or (counter shl 3)
+					initial[parameterStart + row * 3] = limit
+					initial[parameterStart + row * 3 + 1] = gate.simulationOnTicks
+				}
+				for ((row, gate) in programmers) {
+					val slot = programmerSlots[row]!!
+					initial[slot] = gate.simulationIndex()
+					val self = writes[row * 5]
+					initial[self] = initial[self] or (gate.simulationLatchBits() shl 3)
+				}
+				for ((slot, gate) in latches) if (gate.simulationArmed) initial[slot] = initial[slot] or 8
+				for ((row, gate) in keys) {
+					if (gate.locked) {
+						val self = writes[row * 5]
+						initial[self] = initial[self] or 8
+					}
+				}
+				for ((row, gate) in stops) {
+					val self = writes[row * 5]
+					if (gate.simulationArmed) initial[self] = initial[self] or 8
+					initial[parameterStart + row * 3] = if (gate.simulationCanStop()) 1 else 0
+				}
+				for ((row, tap) in taps) initial[parameterStart + row * 3] = tap.bit
+				for (i in buses.indices) initial[stateIds.size + i] = buses[i].current
+				for (i in inputs.indices) initial[stateCount + i] = if (inputs[i].inverted) 1 else 0
+			}
+			if (programmers.isNotEmpty() && count > remainingProgramTicks) return false
+			if (handle == 0L) {
+				handle = TerniNative.createResidentBatchV3(gates, pins, writes, stateCount,
+					partitions?.layout ?: IntArray(0), partitions?.groups ?: 0, allowSoftware, buses.size,
+					programmers.size, initial.size, hostState.words.size)
+				status = "Terni ${TerniNative.describe(handle)} (batched) | $gateCount gates$mode"
 			}
 			val start = System.nanoTime()
-			TerniNative.evaluateBatch(handle, initial, schedule, results, resident, publish)
+			if (!TerniNative.evaluateBatchV3(handle, initial, schedule, results, resident, publish,
+					if (programUploadPending) initial.size else programStart, hostState.words)) {
+				// Nothing from this attempt was published. The world replays from its host checkpoint.
+				resident = false
+				return false
+			}
+			programUploadPending = false
 			if (wide && resident && !publish && drives.isEmpty()) {
 				val measured = (System.nanoTime() - start).toDouble() / count
 				tickNanos = if (samples == 0) measured else tickNanos * 0.875 + measured * 0.125
@@ -328,20 +491,71 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 					else if (duration < 500_000 && previewTicks < maxPreviewTicks) previewTicks *= 2
 				}
 			}
+			if (programmers.isNotEmpty()) remainingProgramTicks -= count
 			resident = !publish
+			return true
+		}
+
+		private fun configureProgrammers(count: Int): Boolean {
+			var words = programStart.toLong()
+			remainingProgramTicks = Int.MAX_VALUE
+			for (gate in programmers.values) {
+				val index = gate.simulationIndex()
+				val bytes = gate.simulationByteCount()
+				if (index < -1 || bytes > Int.MAX_VALUE / 8) return false
+				if (index >= 0) remainingProgramTicks = minOf(remainingProgramTicks, Int.MAX_VALUE - index)
+				words += (bytes.toLong() + 3) / 4
+			}
+			if (words > Int.MAX_VALUE || count > remainingProgramTicks) return false
+			if (words.toInt() != initial.size) {
+				close()
+				initial = IntArray(words.toInt())
+			}
+			val changed = programmers.values.withIndex().any { programRevisions[it.index] != it.value.simulationProgramRevision }
+			if (!changed && !programUploadPending) return true
+			var start = programStart
+			var program = 0
+			for ((row, gate) in programmers) {
+				programRevisions[program++] = gate.simulationProgramRevision
+				val param = parameterStart + row * 3
+				val bytes = gate.simulationByteCount()
+				initial[param] = start
+				initial[param + 1] = bytes
+				initial[param + 2] = programmerSlots[row]!!
+				for (index in 0 until bytes step 4) {
+					var packed = 0
+					for (byte in 0 until minOf(4, bytes - index)) {
+						packed = packed or ((gate.simulationByte(index + byte).toInt() and 255) shl (byte * 8))
+					}
+					initial[start++] = packed
+				}
+			}
+			programUploadPending = true
 			return true
 		}
 
 		fun synchronize(states: StateManager): Boolean {
 			if (!resident) return false
-			TerniNative.readBatch(handle, results)
+			TerniNative.readBatchV3(handle, results, hostState.words)
 			apply(states)
 			resident = false
 			return true
 		}
 
 		fun apply(states: StateManager) {
-			for (i in stateIds.indices) states[stateIds[i]] = results[i] != 0
+			hostState.restore()
+			for ((row, gate) in keys) gate.locked = (results[writes[row * 5]] and 2) != 0
+			for ((row, gate) in stops) gate.simulationArmed = (results[writes[row * 5]] and 2) != 0
+			for (i in stateIds.indices) {
+				val id = stateIds[i]
+				if (id >= 0) states[id] = (results[i] and 1) != 0
+			}
+			for (i in buses.indices) buses[i].restoreSimulationWord(results[stateIds.size + i])
+			for ((slot, gate) in latches) gate.simulationArmed = (results[slot] and 2) != 0
+			for ((row, gate) in programmers) {
+				gate.restoreSimulationState(results[programmerSlots[row]!!], results[writes[row * 5]] ushr 1)
+			}
+			for ((row, gate) in timers) gate.simulationCounter = results[writes[row * 5]] ushr 1
 		}
 
 		fun disable(error: Throwable) {
@@ -354,29 +568,77 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 			if (handle != 0L) TerniNative.destroy(handle)
 			handle = 0L
 			resident = false
+			programUploadPending = programmers.isNotEmpty()
 		}
 
 		companion object {
-			fun create(rows: IntArray, inputNets: IntArray, reductions: Reductions,
-				sampled: IntArray, inputs: Array<Input>): BatchPlan {
+			fun create(topology: Topology, reductions: Reductions): BatchPlan {
+				val sampled = topology.sampled
+				val inputNets = topology.inputNets
 				val states = LinkedHashMap<Int, Int>()
-				for (state in reductions.states) states[state.id] = states.size
+				val stateIds = IntArray(reductions.states.size + sampled.size)
+				for ((slot, state) in reductions.states.withIndex()) {
+					val id = state?.id ?: -1
+					if (id >= 0) states[id] = slot
+					stateIds[slot] = id
+				}
+				var stateCount = reductions.states.size
 				val netSlots = IntArray(sampled.size + 1) { -1 }
-				for (i in sampled.indices) netSlots[i + 1] = states.getOrPut(sampled[i]) { states.size }
+				for (i in sampled.indices) netSlots[i + 1] = states.getOrPut(sampled[i]) {
+					stateIds[stateCount] = sampled[i]
+					stateCount++
+					stateCount - 1
+				}
 				val pins = IntArray(inputNets.size) { netSlots[inputNets[it]] }
-				return BatchPlan(rows, pins, reductions.writes, states.keys.toIntArray(),
-					states, inputs, reductions.privateCount)
+				val latches = LinkedHashMap<Int, ClockedGate>()
+				val timers = LinkedHashMap<Int, TimedGate>()
+				val taps = LinkedHashMap<Int, BusTap>()
+				val buses = LinkedHashMap<BusSignal, Int>()
+				val programmers = LinkedHashMap<Int, ProgramInputGate>()
+				val ram = LinkedHashMap<Int, RamGate>()
+				val stops = LinkedHashMap<Int, StopGate>()
+				val keys = LinkedHashMap<Int, KeyGate>()
+				val serial = LinkedHashMap<Int, SerialIOGate>()
+				for ((row, gate) in topology.gates.withIndex()) {
+					if (gate is ClockedGate) latches[reductions.writes[row * 5]] = gate
+					if (gate is TimedGate) timers[row] = gate
+					if (gate is ProgramInputGate) programmers[row] = gate
+					if (gate is RamGate) ram[row] = gate
+					if (gate is StopGate) stops[row] = gate
+					if (gate is KeyGate) keys[row] = gate
+					if (gate is SerialIOGate) serial[row] = gate
+					if (gate is BusTap) {
+						taps[row] = gate
+						val signal = gate.simulationBus() ?: continue
+						val extra = topology.rows.size + topology.terminals.size + row * 5
+						reductions.writes[extra] = buses.getOrPut(signal) { stateCount + buses.size }
+					}
+				}
+				return BatchPlan(topology.rows, pins, reductions.writes, stateIds.copyOf(stateCount),
+					states, topology.terminals, reductions.privateCount, latches, timers, taps, buses.keys.toTypedArray(), programmers,
+					ResidentHostState(ram, serial, stops.isNotEmpty()), stops, keys)
 			}
 		}
 	}
 
-	private fun opcode(gate: ITickable?) = when (gate) {
+	private fun opcode(gate: ITickable?, resident: Boolean) = when (gate) {
 		is AndGate -> 0
 		is NandGate -> 1
 		is OrGate -> 2
 		is NorGate -> 3
 		is XorGate -> 4
 		is XnorGate -> 5
+		is HalfAdderGate -> if (resident) 6 else -1
+		is MemoryGate -> if (resident) 7 + gate.simulationControllerCount() else -1
+		is TFFGate -> if (resident) 12 + gate.simulationControllerCount() else -1
+		is DelayGate -> if (resident) 17 else -1
+		is PWMGate -> if (resident) 18 else -1
+		is BusTap -> if (!resident) -1 else if (gate.feedsBus) 19 else 20
+		is ProgramInputGate -> if (resident) 21 + gate.simulationControllerCount() else -1
+		is RamGate -> if (resident) 26 + gate.simulationControllerCount() else -1
+		is StopGate -> if (resident) 31 else -1
+		is KeyGate -> if (resident) 32 else -1
+		is SerialIOGate -> if (resident) 33 else -1
 		else -> -1
 	}
 
@@ -389,7 +651,6 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		private var gpuMs = 0.0
 		private var start = 0L
 		var reported = false
-		val batchStatus = "Terni $device (batched) | $gateCount gates${batch?.mode.orEmpty()}"
 		private val timing = DoubleArray(120)
 		var samples = 0
 			private set

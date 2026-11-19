@@ -2,7 +2,7 @@ package me.wieku.circuits.desktop.simulation
 
 internal data class BatchPartitions(val groups: Int, val layout: IntArray) {
 	companion object {
-		fun build(gateRows: IntArray, pins: IntArray, writes: IntArray, stateCount: Int): BatchPartitions? {
+		fun build(gateRows: IntArray, pins: IntArray, writes: IntArray, stateCount: Int, programmerSlots: Map<Int, Int>): BatchPartitions? {
 			val gateCount = gateRows.size / 5
 			val parents = IntArray(stateCount) { it }
 			val sizes = IntArray(stateCount) { 1 }
@@ -26,8 +26,13 @@ internal data class BatchPartitions(val groups: Int, val layout: IntArray) {
 			}
 			// Include readers, writers and indicator states. Even two read-only users
 			// of the same state stay together so every slot has exactly one owner.
+			val extraStart = gateRows.size + pins.size / 4
 			for (base in gateRows.indices step 5) {
 				val self = writes[base]
+				if (writes.size > extraStart && (gateRows[base] == 6 || gateRows[base] in 19..25)) {
+					for (pin in 0..4) join(self, writes[extraStart + base + pin])
+				}
+				programmerSlots[base / 5]?.let { join(self, it) }
 				for (pin in 1..4) {
 					join(self, writes[base + pin])
 					val input = gateRows[base + pin]

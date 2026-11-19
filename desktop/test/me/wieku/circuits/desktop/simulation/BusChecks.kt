@@ -90,9 +90,9 @@ internal fun verifyBusParity(software: Boolean) {
 				world.drive(4, 1, tick % 2 == 0L)
 				if (tick == 11L) world.removeElement(Vector2i(5, 3))
 				if (tick == 13L) world.place(5, 3, "bus")
-				world.update(tick)
+				world.updateBatch(tick, 1)
 			}
-			check(gpu.simulationStatus.startsWith("Terni ")) { gpu.simulationStatus }
+			check(gpu.simulationStatus.contains("(batched)")) { gpu.simulationStatus }
 			check(cpu.getStateManager().input.contentEquals(gpu.getStateManager().input))
 			for (axis in listOf(Axis.HORIZONTAL, Axis.VERTICAL)) {
 				for (bit in 0..7) check(cpu.bit(5, 4, axis, bit) == gpu.bit(5, 4, axis, bit))

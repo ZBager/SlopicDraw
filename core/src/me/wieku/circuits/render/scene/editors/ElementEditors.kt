@@ -64,7 +64,7 @@ internal class ElementEditors(private val stage: Stage, private val world: Class
 			}
 			is ProgramInputGate -> show(element) {
 				val editor = hex(synchronized(world) { element.bytes.copyOf() })
-				return@show { element.bytes = editor.saveToBytes() }
+				return@show { element.replaceProgram(editor.saveToBytes()) }
 			}
 			is RamGate -> show(element) {
 				val editor = hex(synchronized(world) { element.memory.copyOf() })

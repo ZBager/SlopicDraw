@@ -13,22 +13,27 @@ internal const val BUS_WIDTH = 8
 private const val BUS_MASK = (1 shl BUS_WIDTH) - 1
 
 /** Independent Classic-style bit lanes on one connected bus. */
-internal class BusSignal(initial: Int) {
+class BusSignal internal constructor(initial: Int) {
 	var current = initial
 		private set
 	private var pending = initial
 	private var driven = 0
 
-	fun read(bit: Int) = current and (1 shl bit) != 0
+	internal fun read(bit: Int) = current and (1 shl bit) != 0
 
-	fun drive(bit: Int, high: Boolean) {
+	internal fun drive(bit: Int, high: Boolean) {
 		val mask = 1 shl bit
 		if (high) pending = pending or mask
 		else if (driven and mask == 0) pending = pending and mask.inv()
 		driven = driven or mask
 	}
 
-	fun commit() {
+	fun restoreSimulationWord(word: Int) {
+		pending = word and BUS_MASK
+		commit()
+	}
+
+	internal fun commit() {
 		current = pending
 		driven = 0
 	}

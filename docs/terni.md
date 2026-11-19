@@ -62,7 +62,12 @@ JNI sends the topology at initialization and uses one bulk call per tick. It upl
 
 - **Net reduction** runs when all tickable gates compile and private output states have independent writers. A shader invocation evaluates a gate. Integer atomic OR combines wire drivers and marks that a write occurred. Unvisited input indicators and undriven nets retain their pending values. The host merges wire results through Classic's existing `State.setActive` to honor writes made earlier in the tick, then commits.
 - **Hybrid** runs mixed circuits and layouts with dependent writers. The GPU returns each accelerated gate's value along with the inputs visited during its evaluation. Kotlin applies these results in the original tickable order, interleaved with Classic components. Classic's shared-wire resolution and input indicator side effects are preserved.
-- **Classic components** include T flip-flops, Memory (D flip-flop), delay, PWM, half-adder, programmer, RAM, serial IO, keyboard and stop/debug gates. They run their existing implementations in a mixed circuit. A world containing only these components reports Classic.
+- **Resident batches** also support Half Adder, Memory (D flip-flop), T Flip-Flop, Delay, PWM, Programmer, Bus Input, and Bus Output when all tickable elements compile. Half Adder and Programmer can drive an Output terminal and its attached wires. Each bus segment keeps all eight lanes in one device word, with separate words for the axes of a crossing. Programmer bytes stay on the device until edited. Exact synchronization restores signals, bus words, flip-flop latches, timer counters, and Programmer runtime state. Timer limits and counters outside the resident representation use Classic evaluation.
+- **RAM** keeps its command registers and packed memory in a device buffer. Snapshots restore both. If a resize exceeds the allocation or requires clearing more than 256 bytes, LogicDraw discards the unpublished results and replays from the last host checkpoint. Classic performs the resize on its original tick. A later batch can allocate the larger buffer. The resident path admits up to 1 MiB per RAM and 32 MiB for the board's RAM arena.
+- **Stop** evaluates its input and edge latch in resident batches. When an enabled Stop with an attached clock triggers, LogicDraw discards the speculative results, replays unpublished ticks, and finishes the triggering tick in Classic order. The editor clock pauses before the next tick. Manual ticks and explicit headless batches retain their existing behavior.
+- **Keyboard** evaluates its lock and output in resident batches. Key-down and key-up events synchronize the latest completed tick before the JVM applies the existing momentary or bistable behavior.
+- **Serial I/O** keeps its protocol registers on the device. Stream availability checks, reads, writes, and flushes run on the JVM. At a stream operation, LogicDraw discards the speculative results and replays in Classic gate order so each host operation occurs once on its original tick.
+- **Classic evaluation** handles the additional resident gates and bus taps during ordinary single ticks and when a board cannot run a resident batch.
 
 AND with zero inputs is false, XOR is parity, and NAND, NOR and XNOR invert their underlying results. OR and AND visit inputs in Classic's short-circuit order. Tick reads see current state, while writes affect pending state. In feedback and long wire networks this gives the same tick boundary as Classic. Save formats and persisted fields remain the same. Backend switching through `ClassicWorld.setSimulationBackend` preserves the live world. The desktop selector applies at launch.
 
@@ -73,6 +78,16 @@ Run the differential harness on the selected Vulkan device:
 ```sh
 ./gradlew -PdesktopOnly :desktop:terniCheck -Dlogicdraw.terni.library="$LOGICDRAW_TERNI"
 ```
+
+Use `terniResidentBenchmark -Psequential=true -Psizes=16,64,200,10000` with the
+same library property to compare 60 Hz resident Terni against Classic on
+feedback circuits that drive T Flip-Flops.
+Use `-PbusProgrammer=true` in place of `-Psequential=true` for feedback
+circuits that drive a Programmer, Bus Input, and Bus Output.
+Use `-Pram=true` in place of those options for feedback circuits that drive RAM.
+Use `-Pstop=true` for a steady-state measurement with armed Stop gates.
+Use `-PhostIo=true` for feedback circuits containing Keyboard and Serial I/O
+gates with no external key or stream activity during the measurement.
 
 It checks both Vulkan paths against the real Kotlin simulator, including four-input truth tables, empty gates, seeded circuits, feedback, shared drivers, long wires, crosses, sequential state, live edits and paste, v1 and v2 saves, backend switching and an unavailable library. It compares the full Classic signal buffers each tick and serialized state across the mixed-circuit run. Terni's checked dispatch also compares forward, reverse and parallel shader execution once per compiled test topology. On Linux, force Mesa software Vulkan by specifying its ICD JSON in `VK_DRIVER_FILES` and allowing software with the property above.
 
@@ -113,7 +128,7 @@ For this workload Terni first won at the 10,000-gate sample. At one million gate
 
 The 100,000-gate rendering benchmark under Xvfb with llvmpipe OpenGL measured 21.7 FPS and 319.6 TPS with Classic, and 22.6 FPS and 695.5 TPS with Terni on the RTX 4070 Ti.
 
-The bridge and differential harness have been exercised on Linux hardware Vulkan and on Linux and Windows with Mesa software Vulkan. Mobile builds remain unverified. Sequential and external-IO transitions execute on the CPU, and hybrid circuits can spend most of a tick in ordered host replay. Current performance work covers combinational offload and bulk transfers. Persistent GPU-side state across ticks, incremental topology buffers, and an independent optimized CPU benchmark remain open.
+The bridge and differential harness have been exercised on Linux hardware Vulkan and on Linux and Windows with Mesa software Vulkan. Mobile builds remain unverified. Resident batches cover the stock gates and bus taps. Circuits with frequent host effects can spend most of their time in ordered replay. Incremental topology uploads and automatic selection based on the Classic crossover remain open.
 
 ## Continuous integration and releases
 

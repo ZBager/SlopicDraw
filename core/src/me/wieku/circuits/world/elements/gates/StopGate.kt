@@ -4,7 +4,6 @@ import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.world.IWorld
 import me.wieku.circuits.save.SaveManager
 import me.wieku.circuits.world.ClassicWorld
-import java.util.HashMap
 
 class StopGate(pos: Vector2i): SaveableGate(pos) {
 
@@ -13,17 +12,16 @@ class StopGate(pos: Vector2i): SaveableGate(pos) {
 	private var toUpdate = true
 	private var world: ClassicWorld? = null
 
-	override fun update(tick: Long) {
-		var calc = inputs.isActive()
+	var simulationArmed: Boolean
+		get() = toUpdate
+		set(value) { toUpdate = value }
 
-		if(calc) {
-			if(toUpdate) {
-				if(enabled) {
-					if(world!!.clock != null) {
-						world!!.clock!!.stop()
-						state!!.setActiveU(true)
-					}
-				}
+	fun simulationCanStop() = enabled && world?.clock != null
+
+	override fun update(tick: Long) {
+		if (inputs.isActive()) {
+			if (toUpdate) {
+				if (enabled && world!!.stopFromGate()) state!!.setActiveU(true)
 				toUpdate = false
 			}
 		} else {

@@ -17,6 +17,10 @@ import me.wieku.circuits.save.SaveManagers
 import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.WorldClipboard
 import me.wieku.circuits.world.elements.gates.DelayGate
+import me.wieku.circuits.world.elements.gates.PWMGate
+import me.wieku.circuits.world.elements.gates.ProgramInputGate
+import me.wieku.circuits.world.elements.bus.BusTap
+import me.wieku.circuits.world.elements.bus.BusWire
 import me.wieku.circuits.world.elements.io.Input
 import me.wieku.circuits.world.simulation.ClassicSimulation
 import me.wieku.circuits.world.simulation.SimulationBackend
@@ -35,7 +39,7 @@ private val software = java.lang.Boolean.getBoolean("logicdraw.terni.software")
 
 private fun ClassicWorld.place(x: Int, y: Int, name: String) = placeElement(Vector2i(x, y), name)
 
-private fun checkState(cpu: ClassicWorld, gpu: ClassicWorld, tick: Long) {
+internal fun checkState(cpu: ClassicWorld, gpu: ClassicWorld, tick: Long) {
 	val a = cpu.getStateManager()
 	val b = gpu.getStateManager()
 	check(a.input.contentEquals(b.input)) { "Current state diverged at tick $tick" }
@@ -44,9 +48,9 @@ private fun checkState(cpu: ClassicWorld, gpu: ClassicWorld, tick: Long) {
 	check(a.usedNodes == b.usedNodes)
 }
 
-private fun save(world: ClassicWorld): ByteArray {
+internal fun save(world: ClassicWorld, version: Int = 2): ByteArray {
 	val out = ByteArrayOutputStream()
-	val manager: SaveManager = SaveManagers.getSaveManager(2)
+	val manager: SaveManager = SaveManagers.getSaveManager(version)
 	manager.saveMap(world, DataOutputStream(out))
 	return out.toByteArray()
 }
@@ -226,6 +230,192 @@ private fun verifyReduction(batched: Boolean = false, wide: Boolean = false) {
 	} finally {
 		gpu.closeSimulation()
 	}
+}
+
+private fun verifyResidentProgrammerAndBus(mode: String) {
+	val cpu = ClassicWorld(290, 16, "resident programmer", ClassicSimulation)
+	val gpu = ClassicWorld(290, 16, "resident programmer", TerniSimulation(software))
+	try {
+		for (world in listOf(cpu, gpu)) {
+			world.place(6, 6, "programmer")
+			world.place(5, 6, "input")
+			world.place(4, 6, "wire")
+			world.place(6, 5, "controller")
+			world.place(6, 4, "wire")
+			world.place(6, 7, "out")
+			world.place(6, 8, "wire")
+			world.place(7, 6, "wire")
+			world.place(8, 6, "bus_in")
+			world.place(9, 6, "bus")
+			world.place(10, 6, "bus_out")
+			world.place(11, 6, "wire")
+			world.place(20, 5, "bus_out") // A disconnected output drives low.
+			world.place(21, 5, "wire")
+			when (mode) {
+				"partitioned" -> repeat(257) { world.place(20 + it, 12, "or") }
+				"multi-workgroup" -> {
+					for (x in 12..276) world.place(x, 6, "wire")
+					repeat(257) { world.place(20 + it, 7, "or") }
+				}
+			}
+			world.updateTasks()
+			(world[8, 6] as BusTap).bit = 7
+			(world[10, 6] as BusTap).bit = 7
+			(world[6, 6] as ProgramInputGate).replaceProgram(byteArrayOf(0xb2.toByte()))
+			world[21, 5]!!.getState(Axis.HORIZONTAL)!!.setActiveU(true)
+		}
+		for (tick in 0L..48L) {
+			for (world in listOf(cpu, gpu)) {
+				if (tick == 26L) (world[6, 6] as ProgramInputGate).replaceProgram(
+					byteArrayOf(0x79, 0x15, 0x27, 0x55, 0x60))
+				if (tick == 40L) (world[6, 6] as ProgramInputGate).replaceProgram(
+					byteArrayOf(0x18, 0x35, 0x02, 0x1f, 0x25))
+				if (tick == 41L) (world[10, 6] as BusTap).bit = 6
+				world[4, 6]!!.getState(Axis.HORIZONTAL)!!.setActiveU(tick % 2 == 0L)
+				world[6, 4]!!.getState(Axis.VERTICAL)!!.setActiveU(tick in 21L..22L)
+				world.updateBatch(tick, 1)
+			}
+			check(gpu.simulationStatus.contains(mode)) { gpu.simulationStatus }
+			checkState(cpu, gpu, tick)
+			val cpuBus = cpu[9, 6] as BusWire
+			val gpuBus = gpu[9, 6] as BusWire
+			for (bit in 0..7) check(cpuBus.readBit(Axis.HORIZONTAL, bit) == gpuBus.readBit(Axis.HORIZONTAL, bit))
+			check(save(cpu, 3).contentEquals(save(gpu, 3))) { "Programmer state diverged at tick $tick" }
+		}
+		for (tick in 49L..64L step 4) {
+			cpu.updateBatch(tick, 4)
+			check(gpu.updatePreviewBatch(tick, 4, tick) == 4)
+		}
+		check(gpu.previewReadbacks == 1L)
+		gpu.synchronizeSimulation()
+		checkState(cpu, gpu, 64)
+		check(save(cpu, 3).contentEquals(save(gpu, 3)))
+		gpu.setSimulationBackend(ClassicSimulation)
+		cpu.update(65)
+		gpu.update(65)
+		checkState(cpu, gpu, 65)
+	} finally {
+		cpu.closeSimulation()
+		gpu.closeSimulation()
+	}
+	println("Resident Programmer and bus parity passed ($mode).")
+}
+
+private fun verifyProgrammerFeedback() {
+	val cpu = programmerBusBoard(8, ClassicSimulation, active = true)
+	val gpu = programmerBusBoard(8, TerniSimulation(software), active = true)
+	try {
+		// Drive the clock from resident feedback, including a carry-driven reset.
+		for (tick in 0L until 153L step 17) {
+			cpu.updateBatch(tick, 17)
+			check(gpu.updatePreviewBatch(tick, 17, tick) == 17)
+		}
+		check(gpu.previewReadbacks == 1L)
+		gpu.synchronizeSimulation()
+		checkState(cpu, gpu, 152)
+		check(save(cpu, 3).contentEquals(save(gpu, 3)))
+	} finally {
+		cpu.closeSimulation()
+		gpu.closeSimulation()
+	}
+}
+
+private fun verifyResidentSequential(mode: String) {
+	val cpu = ClassicWorld(300, 16, "resident sequential", ClassicSimulation)
+	val gpu = ClassicWorld(300, 16, "resident sequential", TerniSimulation(software))
+	try {
+		for (world in listOf(cpu, gpu)) {
+			world.place(4, 6, "half_adder")
+			world.place(3, 6, "input")
+			world.place(2, 6, "wire")
+			world.place(4, 5, "input")
+			world.place(4, 4, "wire")
+			world.place(4, 7, "out")
+			world.place(4, 8, "wire")
+			world.place(5, 6, "wire")
+			world.place(6, 6, "input")
+			world.place(7, 6, "memory")
+			world.place(7, 5, "controller")
+			world.place(7, 4, "wire")
+			world.place(7, 7, "wire")
+			world.place(11, 6, "tflipflop")
+			world.place(10, 6, "input")
+			world.place(9, 6, "wire")
+			world.place(11, 5, "controller")
+			world.place(11, 4, "wire")
+			world.place(12, 6, "wire")
+			world.place(16, 5, "delay")
+			world.place(16, 4, "input")
+			world.place(16, 3, "wire")
+			world.place(16, 6, "wire")
+			world.place(18, 5, "pwm")
+			world.place(18, 4, "input")
+			world.place(18, 3, "wire")
+			world.place(18, 6, "wire")
+			when (mode) {
+				"partitioned" -> repeat(257) { world.place(20 + it, 12, "or") }
+				"multi-workgroup" -> {
+					world.place(7, 8, "wire")
+					for (x in 8..276) world.place(x, 8, "wire")
+					repeat(257) { world.place(20 + it, 9, "or") }
+				}
+			}
+			world.updateTasks()
+			val delay = world[16, 5] as DelayGate
+			delay.pasteData(delay.copyData().apply {
+				put("delay", 3)
+				put("counter", 2)
+			})
+			val pwm = world[18, 5] as PWMGate
+			pwm.pasteData(pwm.copyData().apply {
+				put("period", 5)
+				put("duty", 40)
+				put("counter", 2)
+			})
+			// On the first tick Memory holds its pending output while the controller is low.
+			world[7, 6]!!.getState(Axis.HORIZONTAL)!!.setActiveU(true)
+		}
+		for (tick in 0L..15L) {
+			for (world in listOf(cpu, gpu)) {
+				world[2, 6]!!.getState(Axis.HORIZONTAL)!!.setActiveU(tick and 1L != 0L)
+				world[4, 4]!!.getState(Axis.VERTICAL)!!.setActiveU(tick and 2L != 0L)
+				world[7, 4]!!.getState(Axis.VERTICAL)!!.setActiveU(tick % 5 >= 2)
+				world[9, 6]!!.getState(Axis.HORIZONTAL)!!.setActiveU(tick % 3 != 0L)
+				world[11, 4]!!.getState(Axis.VERTICAL)!!.setActiveU(tick == 5L || tick == 9L)
+				world[16, 3]!!.getState(Axis.VERTICAL)!!.setActiveU(tick % 8 < 4)
+				world[18, 3]!!.getState(Axis.VERTICAL)!!.setActiveU(tick == 7L)
+				world.updateBatch(tick, 1)
+			}
+			check(gpu.simulationStatus.contains(mode)) { gpu.simulationStatus }
+			checkState(cpu, gpu, tick)
+			check(save(cpu).contentEquals(save(gpu))) { "Sequential state diverged at tick $tick" }
+		}
+		// Advance across unpublished bursts, then synchronize the latch and signals.
+		for (tick in 16L..31L step 4) {
+			cpu.updateBatch(tick, 4)
+			check(gpu.updatePreviewBatch(tick, 4, tick) == 4)
+		}
+		check(gpu.previewReadbacks == 1L)
+		gpu.synchronizeSimulation()
+		checkState(cpu, gpu, 31)
+		check(save(cpu).contentEquals(save(gpu)))
+		for (world in listOf(cpu, gpu)) {
+			val delay = world[16, 5] as DelayGate
+			delay.pasteData(delay.copyData().apply { put("delay", Int.MAX_VALUE) })
+			world.updateBatch(32, 2)
+		}
+		check(!gpu.simulationStatus.contains("(batched)")) { gpu.simulationStatus }
+		checkState(cpu, gpu, 33)
+		check(save(cpu).contentEquals(save(gpu)))
+		gpu.setSimulationBackend(ClassicSimulation)
+		cpu.update(34)
+		gpu.update(34)
+		checkState(cpu, gpu, 34)
+	} finally {
+		cpu.closeSimulation()
+		gpu.closeSimulation()
+	}
+	println("Resident Half Adder, Memory, T Flip-Flop, Delay, and PWM parity passed ($mode).")
 }
 
 private fun verifySequentialEdges() {
@@ -437,7 +627,10 @@ fun main(args: Array<String>) {
 	} else if (args.isNotEmpty() && args[0] == "batch") {
 		benchmarkBatches(software, args[1].toInt())
 	} else if (args.isNotEmpty() && args[0] == "resident") {
-		benchmarkResident(args[1].split(',').map { it.toInt() }, software, args[2].toInt(), args[3].toBoolean())
+		benchmarkResident(args[1].split(',').map { it.toInt() }, software, args[2].toInt(), args[3].toBoolean(),
+			args.getOrNull(4)?.toBoolean() ?: false, args.getOrNull(5)?.toBoolean() ?: false,
+			args.getOrNull(6)?.toBoolean() ?: false, args.getOrNull(7)?.toBoolean() ?: false,
+			args.getOrNull(8)?.toBoolean() ?: false)
 	} else if (args.isNotEmpty() && args[0] == "benchmark") {
 		val ticks = args[2].toInt()
 		require(ticks > 0)
@@ -457,9 +650,27 @@ fun main(args: Array<String>) {
 		verifyPreviewCadence(software)
 		verifyPreviewCadence(software, gates = 512)
 		verifyPreviewCadence(software, gates = 512, connected = true)
+		verifyResidentSequential("(batched)")
+		verifyResidentSequential("partitioned")
+		verifyResidentSequential("multi-workgroup")
 		verifySequentialEdges()
 		verifyBusParity(software)
+		verifyResidentProgrammerAndBus("(batched)")
+		verifyResidentProgrammerAndBus("partitioned")
+		verifyResidentProgrammerAndBus("multi-workgroup")
+		verifyProgrammerFeedback()
+		verifyResidentRam(software, "(batched)")
+		verifyResidentRam(software, "partitioned")
+		verifyResidentRam(software, "multi-workgroup")
+		verifyResidentStop(software, "(batched)")
+		verifyResidentStop(software, "partitioned")
+		verifyResidentStop(software, "multi-workgroup")
+		for (mode in listOf("(batched)", "partitioned", "multi-workgroup")) {
+			verifyResidentKeyboard(software, mode)
+			verifyResidentSerial(software, mode)
+		}
 		verifyFallback()
 		if (args.isNotEmpty()) verifyLegacySave(File(args[0]))
+		verifyStopClock(software)
 	}
 }

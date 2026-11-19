@@ -1,21 +1,11 @@
 package me.wieku.circuits.world.elements.gates
 
-import me.wieku.circuits.api.element.BasicInput
-import me.wieku.circuits.api.element.BasicWire
-import me.wieku.circuits.api.element.holders.Inputs
-import me.wieku.circuits.api.math.Axis
 import me.wieku.circuits.api.math.Vector2i
-import me.wieku.circuits.api.world.IWorld
 import me.wieku.circuits.save.SaveManager
 import me.wieku.circuits.world.ClassicWorld
-import me.wieku.circuits.world.elements.io.Controller
 import kotlin.collections.HashMap
 
-class MemoryGate(pos: Vector2i): SaveableGate(pos) {
-
-	private var toUpdate = true
-
-	protected val controllers = Inputs()
+class MemoryGate(pos: Vector2i): ClockedGate(pos) {
 
 	override fun update(tick: Long) {
 		var calc = controllers.isActive()
@@ -36,23 +26,6 @@ class MemoryGate(pos: Vector2i): SaveableGate(pos) {
 	override fun getIdleColor(): Int = 0x37474F
 
 	override fun getActiveColor(): Int = 0x455A64
-
-	override protected fun updateIO(world: IWorld) {
-		inputs.clear()
-		outputs.clear()
-		controllers.clear()
-
-		world.getNeighboursOf(this) {
-			when(it) {
-				is BasicInput -> {
-					if(it is Controller) controllers += it else inputs += it
-				}
-				is BasicWire -> {
-					outputs += it.getState(Axis.getAxis(getPosition(), it.getPosition()))!!
-				}
-			}
-		}
-	}
 
 	override fun load(world: ClassicWorld, manager: SaveManager) {
 		super.load(world, manager)

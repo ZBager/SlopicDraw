@@ -27,7 +27,7 @@ foreach(shader IN ITEMS evaluate batch)
   add_custom_command(OUTPUT "${header}"
     COMMAND "${GLSLC}" --target-env=vulkan1.3 -O -mfmt=num "-I${terni_SOURCE_DIR}/shaders"
             "${CMAKE_CURRENT_SOURCE_DIR}/${shader}.comp" -o "${header}"
-    DEPENDS "${shader}.comp" "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
+    DEPENDS "${shader}.comp" timer.glsl programmer.glsl "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
     VERBATIM)
   list(APPEND shader_headers "${header}")
 endforeach()
@@ -38,7 +38,17 @@ foreach(stage IN ITEMS initialize evaluate commit)
   add_custom_command(OUTPUT "${header}"
     COMMAND "${GLSLC}" --target-env=vulkan1.3 -O -mfmt=num "-D${stage_define}"
             "-I${terni_SOURCE_DIR}/shaders" "${CMAKE_CURRENT_SOURCE_DIR}/resident.comp" -o "${header}"
-    DEPENDS resident.comp "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
+    DEPENDS resident.comp timer.glsl programmer.glsl "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
+    VERBATIM)
+  list(APPEND shader_headers "${header}")
+endforeach()
+
+foreach(shader IN ITEMS batch resident)
+  set(header "${CMAKE_CURRENT_BINARY_DIR}/${shader}_events.inc")
+  add_custom_command(OUTPUT "${header}"
+    COMMAND "${GLSLC}" --target-env=vulkan1.3 -O -mfmt=num -DHOST_EVENTS
+            "-I${terni_SOURCE_DIR}/shaders" "${CMAKE_CURRENT_SOURCE_DIR}/${shader}.comp" -o "${header}"
+    DEPENDS "${shader}.comp" ram.glsl timer.glsl programmer.glsl "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
     VERBATIM)
   list(APPEND shader_headers "${header}")
 endforeach()

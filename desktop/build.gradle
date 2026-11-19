@@ -89,7 +89,9 @@ task terniResidentBenchmark(type: JavaExec, dependsOn: testClasses) {
     classpath = sourceSets.test.runtimeClasspath
     systemProperties terniProperties
     args "resident", (project.findProperty("sizes") ?: "16,32,64,128,200,256,258,512,1000,3000,10000,30000,50000,100000,300000,1000000"),
-         (project.findProperty("samples") ?: "5000"), (project.findProperty("connected") ?: "false")
+         (project.findProperty("samples") ?: "5000"), (project.findProperty("connected") ?: "false"),
+         (project.findProperty("sequential") ?: "false"), (project.findProperty("busProgrammer") ?: "false"), (project.findProperty("ram") ?: "false"),
+         (project.findProperty("stop") ?: "false"), (project.findProperty("hostIo") ?: "false")
 }
 
 task terniRenderBenchmark(type: JavaExec, dependsOn: testClasses) {

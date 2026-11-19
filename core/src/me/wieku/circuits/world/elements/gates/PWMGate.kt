@@ -6,13 +6,19 @@ import me.wieku.circuits.save.SaveManager
 import me.wieku.circuits.world.ClassicWorld
 import java.util.HashMap
 
-class PWMGate(pos: Vector2i): SaveableGate(pos) {
+class PWMGate(pos: Vector2i): SaveableGate(pos), TimedGate {
 
 	internal var period = 500
 
 	internal var duty = 50
 
 	private var counter = 0
+
+	override var simulationCounter: Int
+		get() = counter
+		set(value) { counter = value }
+	override val simulationLimit get() = period
+	override val simulationOnTicks get() = period * duty / 100
 
 	override fun update(tick: Long) {
 		var calc = inputs.isActive()
@@ -24,7 +30,7 @@ class PWMGate(pos: Vector2i): SaveableGate(pos) {
 			counter += 1
 			counter = MathUtils.clamp(counter, 0, period)
 
-			val ticks = period * duty / 100
+			val ticks = simulationOnTicks
 
 			if(counter <= ticks) {
 				if(!state!!.isActive())

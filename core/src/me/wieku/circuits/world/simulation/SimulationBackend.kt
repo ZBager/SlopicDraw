@@ -20,8 +20,9 @@ interface SimulationBackend {
 	// Choose the next preview burst, independently of the clock's total tick budget.
 	fun previewBatchSize(topology: Long, gates: MappedArray<Vector2i, ITickable>): Int = MAX_BATCH_TICKS
 
-	// A published snapshot goes in output for the world's normal commit. An unpublished
-	// batch retains its results on the device. On false, leave host state untouched.
+	// A published snapshot puts scalar signals in output for the world's normal commit
+	// and restores any other tick state, including bus words. An unpublished batch keeps
+	// its results on the device. On false, leave host state untouched.
 	fun evaluateBatch(count: Int, topology: Long, gates: MappedArray<Vector2i, ITickable>,
 		states: StateManager, drives: List<BatchSignalDrive>, publish: Boolean = true): Boolean = false
 
