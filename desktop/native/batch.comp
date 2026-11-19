@@ -2,15 +2,22 @@
 #extension GL_GOOGLE_include_directive : require
 #include "terni/compute.glsl"
 
-// The host dispatches exactly one workgroup. Keep these limits in sync with the JNI bridge.
+// Each workgroup owns every state it reads or writes. Keep the limits in sync with the bridge.
 layout(constant_id = 2) const uint gateCount = 0;
 layout(constant_id = 3) const uint stateCount = 0;
+layout(constant_id = 4) const uint partitioned = 0;
 layout(std430, binding = 0) readonly buffer GateRows { int gates[]; };
 layout(std430, binding = 1) readonly buffer InputPins { int pins[]; };
 layout(std430, binding = 2) readonly buffer Destinations { int writes[]; };
 layout(std430, binding = 3) readonly buffer Initial { uint initial[]; };
 layout(std430, binding = 4) readonly buffer Schedule { uint schedule[]; };
 layout(std430, binding = 5) buffer Result { uint results[]; };
+
+layout(std430, binding = 6) readonly buffer Partitions { uint groups[]; };
+
+int localSlot(int index) {
+    return index < 0 || partitioned == 0 ? index : int(groups[index]);
+}
 
 shared uint current[2048];
 shared uint flags[2048];
@@ -21,31 +28,44 @@ uint level(int index) {
 
 void main() {
     uint lane = gl_LocalInvocationID.x;
-    uint base = lane * 5;
+    uint groupStates = stateCount;
+    uint groupGates = gateCount;
+    uint stateStart = 0;
+    uint gateStart = 0;
+    if (partitioned != 0) {
+        uint header = stateCount + gl_WorkGroupID.x * 4;
+        stateStart = groups[header];
+        groupStates = groups[header + 1];
+        gateStart = groups[header + 2];
+        groupGates = groups[header + 3];
+    }
+    uint base = (partitioned != 0 && lane < groupGates ? groups[gateStart + lane] : lane) * 5;
     int op = 0;
     ivec4 sources[4];
     ivec4 indicators = ivec4(-1);
     ivec4 sinks = ivec4(-1);
     uvec4 inverted = uvec4(0);
     int self = -1;
-    if (lane < gateCount) {
+    if (lane < groupGates) {
         op = gates[base];
-        self = writes[base];
+        self = localSlot(writes[base]);
         for (uint pin = 0; pin < 4; ++pin) {
             int inputRow = gates[base + 1 + pin];
-            sinks[pin] = writes[base + 1 + pin];
+            sinks[pin] = localSlot(writes[base + 1 + pin]);
             if (inputRow < 0) continue;
             uint start = uint(inputRow) * 4;
-            sources[pin] = ivec4(pins[start], pins[start + 1], pins[start + 2], pins[start + 3]);
-            indicators[pin] = writes[gateCount * 5 + uint(inputRow)];
+            sources[pin] = ivec4(localSlot(pins[start]), localSlot(pins[start + 1]),
+                                  localSlot(pins[start + 2]), localSlot(pins[start + 3]));
+            indicators[pin] = localSlot(writes[gateCount * 5 + uint(inputRow)]);
             inverted[pin] = initial[stateCount + uint(inputRow)];
         }
     }
 
     bool resume = (schedule[0] & 0x10000u) != 0;
-    for (uint i = lane; i < stateCount; i += gl_WorkGroupSize.x) {
-        uint value = initial[i];
-        current[i] = resume ? results[i] : value & 1u;
+    for (uint i = lane; i < groupStates; i += gl_WorkGroupSize.x) {
+        uint state = partitioned != 0 ? groups[stateStart + i] : i;
+        uint value = initial[state];
+        current[i] = resume ? results[state] : value & 1u;
         // An external write before a fresh batch may have already marked this wire driven.
         flags[i] = !resume && (value & 4u) != 0 ? 2u | ((value >> 1) & 1u) : 0u;
     }
@@ -84,14 +104,20 @@ void main() {
         }
         workgroup_sync();
 
-        for (uint i = lane; i < stateCount; i += gl_WorkGroupSize.x) {
+        for (uint i = lane; i < groupStates; i += gl_WorkGroupSize.x) {
             uint writesThisTick = flags[i];
             if (writesThisTick != 0) current[i] = writesThisTick & 1u;
-            else if (tick == 0 && !resume) current[i] = (initial[i] >> 1) & 1u;
+            else if (tick == 0 && !resume) {
+                uint state = partitioned != 0 ? groups[stateStart + i] : i;
+                current[i] = (initial[state] >> 1) & 1u;
+            }
             flags[i] = 0;
         }
         workgroup_sync();
     }
 
-    for (uint i = lane; i < stateCount; i += gl_WorkGroupSize.x) results[i] = current[i];
+    for (uint i = lane; i < groupStates; i += gl_WorkGroupSize.x) {
+        uint state = partitioned != 0 ? groups[stateStart + i] : i;
+        results[state] = current[i];
+    }
 }

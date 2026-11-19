@@ -11,19 +11,32 @@ import java.util.Locale
 
 // A NOR feeds its own input through one electrical net. A neighboring OR drives low
 // on the same net, so each batch exercises both feedback and multiple drivers.
-private fun feedbackBoard(gates: Int, backend: SimulationBackend): ClassicWorld {
+private fun feedbackBoard(gates: Int, backend: SimulationBackend, active: Boolean = true,
+	connected: Boolean = false): ClassicWorld {
 	require(gates > 0 && gates % 2 == 0)
-	val columns = minOf(10, gates / 2)
+	val columns = minOf(500, gates / 2)
 	val rows = (gates / 2 + columns - 1) / columns
 	val world = ClassicWorld(columns * 6, rows * 5, "Batch feedback", backend)
 	for (pair in 0 until gates / 2) {
 		val x = pair % columns * 6
 		val y = pair / columns * 5
-		world.placeElement(Vector2i(x + 1, y + 1), "nor")
+		world.placeElement(Vector2i(x + 1, y + 1), if (active) "nor" else "or")
 		world.placeElement(Vector2i(x + 2, y + 1), "input")
 		world.placeElement(Vector2i(x + 1, y + 2), "wire")
 		world.placeElement(Vector2i(x + 2, y + 2), "wire")
 		world.placeElement(Vector2i(x + 3, y + 2), "or")
+		if (pair % 4096 == 4095) world.updateTasks()
+	}
+	if (connected) {
+		// A shared low-driven net ties all the feedback pairs into one component.
+		val right = columns * 6 - 1
+		for (row in 0 until rows) {
+			for (x in 3..right) world.placeElement(Vector2i(x, row * 5 + 3), "wire")
+			if (row > 0) for (y in 0..3) {
+				world.placeElement(Vector2i(right, row * 5 + y - 1), "wire")
+			}
+			world.updateTasks()
+		}
 	}
 	world.updateTasks()
 	return world
@@ -76,10 +89,10 @@ internal fun verifyBatches(software: Boolean) {
 	}
 }
 
-internal fun verifyPreviewCadence(software: Boolean) {
+internal fun verifyPreviewCadence(software: Boolean, gates: Int = 200, connected: Boolean = false) {
 	for ((hz, expectedReadbacks) in listOf(20 to 3L, 60 to 8L)) {
-		val classic = feedbackBoard(200, ClassicSimulation)
-		val terni = feedbackBoard(200, TerniSimulation(software))
+		val classic = feedbackBoard(gates, ClassicSimulation, connected = connected)
+		val terni = feedbackBoard(gates, TerniSimulation(software), connected = connected)
 		val directory = createTempDir(prefix = "logicdraw-preview-")
 		terni.previewHz = hz
 		try {
@@ -87,7 +100,11 @@ internal fun verifyPreviewCadence(software: Boolean) {
 				val previous = terni.previewReadbacks
 				classic.update(tick)
 				check(terni.updatePreviewBatch(tick, 1, tick * 1_000_000L) == 1)
-				check(terni.simulationStatus.contains("(batched)"))
+				check(terni.simulationStatus.contains(when {
+					connected -> "multi-workgroup"
+					gates > 256 -> "partitioned"
+					else -> "(batched)"
+				}))
 				val host = terni.getStateManager()
 				if (terni.previewReadbacks != previous) {
 					check(host.input.contentEquals(classic.getStateManager().input)) {
@@ -108,15 +125,23 @@ internal fun verifyPreviewCadence(software: Boolean) {
 			terni.update(121)
 			check(terni.getStateManager().input.contentEquals(classic.getStateManager().input))
 
+			if (connected) {
+				terni.updateBatch(122, 17)
+				check(terni.simulationStatus.contains("multi-workgroup"))
+				classic.updateBatch(122, 17)
+				check(terni.getStateManager().input.contentEquals(classic.getStateManager().input))
+			}
+
 			// A live edit must synchronize before reallocating wire states.
-			for (tick in 122L..126L) {
+			val editStart = if (connected) 139L else 122L
+			for (tick in editStart until editStart + 5) {
 				classic.update(tick)
 				terni.updatePreviewBatch(tick, 1, tick * 1_000_000L)
 			}
 			for (world in listOf(classic, terni)) {
 				world.removeElement(Vector2i(1, 2))
 				world.updateTasks()
-				world.update(127)
+				world.update(editStart + 5)
 			}
 			check(terni.getStateManager().input.contentEquals(classic.getStateManager().input))
 		} finally {
@@ -142,29 +167,60 @@ internal fun benchmarkBatches(software: Boolean, samples: Int) {
 	))
 }
 
-internal fun benchmarkResident(sizes: List<Int>, software: Boolean, samples: Int) {
+internal fun benchmarkResident(sizes: List<Int>, software: Boolean, samples: Int, connected: Boolean) {
 	require(sizes.isNotEmpty() && sizes.distinct().size == sizes.size)
-	val cases = listOf(
-		BatchBenchmarkCase("Classic", 1),
-		BatchBenchmarkCase("Terni", 256),
-		BatchBenchmarkCase("Terni resident 60 Hz", 256, 60)
-	)
 	for (gates in sizes) {
-		require(gates in 2..256 && gates % 2 == 0)
-		runBatchBenchmark(gates, software, samples, cases, warmUpForSweep = true)
+		require(gates > 0 && gates % 2 == 0)
+		for (active in listOf(true, false)) {
+			for (accelerated in listOf(false, true)) {
+				val backend = if (accelerated) TerniSimulation(software) else ClassicSimulation
+				val world = feedbackBoard(gates, backend, active, connected)
+				try {
+					world.previewHz = 60
+					val warmup = if (accelerated) 300 else if (gates <= 256) 50_000 else 30
+					val calls = if (gates > 256) minOf(samples, 200) else samples
+					var tick = 0L
+					fun run() {
+						tick += if (accelerated) world.updatePreviewBatch(tick, 256) else {
+							world.update(tick)
+							1
+						}
+					}
+					repeat(warmup) { run() }
+					world.synchronizeSimulation()
+					val firstTick = tick
+					val previousPreviews = world.previewReadbacks
+					val start = System.nanoTime()
+					repeat(calls) { run() }
+					world.synchronizeSimulation()
+					val elapsed = System.nanoTime() - start
+					val ticks = tick - firstTick
+					val previews = world.previewReadbacks - previousPreviews
+					if (accelerated) {
+						check(world.simulationStatus.contains("(batched)")) { world.simulationStatus }
+						if (connected && gates > 256)
+							check(world.simulationStatus.contains("multi-workgroup")) { world.simulationStatus }
+						check(previews > 0)
+					}
+					val expected = active && tick % 2L == 1L
+					check(world[1, 2]!!.getState(Axis.HORIZONTAL)!!.isActive() == expected)
+					println(String.format(Locale.ROOT,
+						"sweep,%d,%s,%s,%.3f,%d,%.9f,%.3f,%d",
+						gates, if (active) "active" else "idle", if (accelerated) "Terni" else "Classic",
+						ticks.toDouble() / calls, ticks, elapsed / 1_000_000.0 / ticks, ticks * 1e9 / elapsed, previews))
+				} finally {
+					world.closeSimulation()
+				}
+			}
+		}
 	}
 }
 
-private fun runBatchBenchmark(gates: Int, software: Boolean, samples: Int, cases: List<BatchBenchmarkCase>,
-	warmUpForSweep: Boolean = false) {
+private fun runBatchBenchmark(gates: Int, software: Boolean, samples: Int, cases: List<BatchBenchmarkCase>) {
 	require(samples > 0)
 	for (case in cases) {
 		val size = case.size
-		val warmup = when {
-			!warmUpForSweep -> 30
-			size == 1 -> 50_000 // Let the JVM optimize the small Classic loop before timing.
-			else -> 300
-		}
+		val warmup = 30
 		val world = feedbackBoard(gates, if (case.name == "Classic") ClassicSimulation else TerniSimulation(software))
 		try {
 			case.previewHz?.let { world.previewHz = it }

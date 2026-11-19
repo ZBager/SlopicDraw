@@ -67,10 +67,12 @@ def parse(log):
 
 
 def gate_label(size, _=None):
+    if size < 1000:
+        return str(size)
     return f"{size / 1_000_000:g}M" if size >= 1_000_000 else f"{size / 1000:g}k"
 
 
-def draw(rows, sizes, directory, metrics, hardware, ticks):
+def draw(rows, sizes, directory, metrics, hardware, ticks, preview=False, connected=False):
     field, title, ylabel, filename = metrics
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
@@ -86,17 +88,25 @@ def draw(rows, sizes, directory, metrics, hardware, ticks):
     })
     fig, axes = plt.subplots(1, 2, figsize=(11.6, 5.6), sharey=True)
     fig.patch.set_facecolor("#f7f9fc")
-    fig.subplots_adjust(left=.09, right=.965, bottom=.22, top=.735, wspace=.15)
+    fig.subplots_adjust(left=.09, right=.965, bottom=.25 if preview else .22, top=.735, wspace=.15)
     fig.text(.09, .94, title, fontsize=20, weight="bold", va="top")
-    fig.text(.09, .86, f"{hardware}  •  {ticks} measured ticks per case", fontsize=10)
+    run_label = ("Terni preview set to 60 Hz" if preview
+                 else f"{ticks} measured ticks per case")
+    fig.text(.09, .86, f"{hardware}  •  {run_label}", fontsize=10)
     for axis, activity in zip(axes, ("active", "idle")):
         axis.set_facecolor("white")
         axis.set_title("Active inputs" if activity == "active" else "Stable inputs", loc="left", pad=11)
         axis.set_xscale("log")
         axis.set_yscale("log")
-        axis.xaxis.set_major_locator(FixedLocator(sizes))
+        if preview:
+            axis.set_title("Toggling feedback" if activity == "active" else "Stable feedback", loc="left", pad=11)
+        # Retain all data points and skip adjacent labels at the crossover.
+        labels = [size for size in sizes if size not in (200, 258)] if preview and 256 in sizes else sizes
+        axis.xaxis.set_major_locator(FixedLocator(labels))
         axis.xaxis.set_major_formatter(FuncFormatter(gate_label))
         axis.tick_params(axis="both", which="both", length=0)
+        if preview:
+            axis.tick_params(axis="x", labelrotation=50, labelsize=9)
         axis.grid(axis="y", which="major", color="#dbe3ec")
         axis.set_axisbelow(True)
         axis.set_xlabel("Gate count", labelpad=9)
@@ -112,11 +122,16 @@ def draw(rows, sizes, directory, metrics, hardware, ticks):
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(.966, .874),
                frameon=False, ncol=2, fontsize=10)
-    fig.text(.09, .095, "Log scales. Classic and Terni ran the same headless circuits.",
-             fontsize=9, color="#41566b")
-    footer = ("Tick time includes evaluation, transfers and host commit."
-              if field == "mean_tick_ms" else
-              "TPS = 1,000 ÷ mean tick latency in ms. No rendering or clock pacing.")
+    if preview:
+        note = ("A shared net links the feedback pairs. Above 256 gates, Terni uses GPU-wide net commit."
+                if connected else "Feedback pairs are independent. Terni batches them in parallel workgroups.")
+        footer = "Mean tick time includes compute, readbacks, host overhead and the final synchronization."
+    else:
+        note = "Log scales. Classic and Terni ran the same headless circuits."
+        footer = ("Tick time includes evaluation, transfers and host commit."
+                  if field == "mean_tick_ms" else
+                  "TPS = 1,000 ÷ mean tick latency in ms. No rendering or clock pacing.")
+    fig.text(.09, .095, note, fontsize=9, color="#41566b")
     fig.text(.09, .061, footer, fontsize=9, color="#41566b")
     fig.savefig(directory / filename, dpi=180, facecolor=fig.get_facecolor())
     plt.close(fig)

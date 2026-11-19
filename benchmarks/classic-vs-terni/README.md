@@ -2,9 +2,10 @@
 
 Measured on Linux x86-64 with an AMD Ryzen 7 7800X3D and NVIDIA GeForce RTX 4070 Ti. Both benchmarks use the implementation with GPU-resident preview batches.
 
+- [60 Hz preview tick latency by gate count](resident-60hz-tick-latency.png) · [60 Hz preview TPS by gate count](resident-60hz-tps.png) · [60 Hz preview CSV](resident-60hz-measurements.csv)
+- [Connected stress case tick latency](resident-60hz-connected-tick-latency.png) · [Connected stress case TPS](resident-60hz-connected-tps.png) · [Connected stress case CSV](resident-60hz-connected-measurements.csv)
 - [Tick latency by gate count](tick-latency.png) · [Throughput by gate count](tps.png) · [Measurements CSV](measurements.csv)
 - [200-gate batching and preview graph](small-circuit-batching.png) · [Small-circuit CSV](small-circuit-measurements.csv)
-- [60 Hz resident preview TPS](resident-60hz-tps.png) · [60 Hz resident preview tick latency](resident-60hz-tick-latency.png) · [Resident preview CSV](resident-60hz-measurements.csv)
 
 ## Gate-count sweep
 
@@ -32,10 +33,13 @@ Both workloads run headlessly without clock pacing or rendering. The small-circu
 
 ## 60 Hz resident preview sweep
 
-This sweep uses the same feedback pairs at 16, 32, 64, 128, 200, and 256 gates. It compares Classic single steps with two Terni paths using 256-tick bursts. One reads back after every burst, and the resident path publishes at most 60 previews per second. Classic had 50,000 warmup calls per size to let the JVM optimize the small loop. Terni had 300 warmup bursts per size. Each case then ran 5,000 measured calls.
+The 60 Hz graphs compare Classic and Terni from 16 to 1,000,000 gates, including the entire gate-count range of the original graphs. Both backends run the same feedback circuit at each size. In the toggling workload, a NOR drives its own input and shares the net with an OR. The stable workload replaces the NOR with an OR, so the net stays low.
 
-The timer includes the final exact synchronization. Mean tick time spreads the cost of each burst over its completed ticks. The CSV also records p95 call latency and the count of scheduled previews. Classic remains faster at 16 gates on this fixture. At 200 gates, the resident path reached **2.36 million TPS at 0.424 µs per tick** and issued **33 scheduled readbacks across 5,000 bursts**, plus the final synchronization. Reading back each burst reached **2.25 million TPS at 0.444 µs per tick**. These are uncapped headless measurements.
+The Terni run uses the editor's preview path at 60 Hz. The main sweep uses independent feedback pairs. Larger boards with this layout can run one shared-memory batch per workgroup, so the 256-gate single-workgroup limit does not end GPU residency. A second sweep links the pairs with one shared low-driven net. It uses GPU-wide gate evaluation and net commit and also exercises contention from many drivers on a single net.
 
+Through 256 gates, Classic warms up for 50,000 ticks. Larger Classic cases warm up for 30 ticks. Terni warms up for 300 calls at every size. Each run then measures 5,000 calls through 256 gates and 200 calls at larger sizes. Terni adapts the number of ticks per call. Mean tick time includes compute, readbacks, host overhead, and final synchronization. TPS uses the same elapsed time. The runs are headless and uncapped. The CSV records completed ticks, mean burst length, and scheduled preview counts. The final synchronization can add one readback.
+
+On the toggling independent circuit, the 256- and 258-gate samples measured 0.427 and 0.434 µs per tick. At 50,000 gates Terni reached 0.743 µs per tick and 1.35 million TPS. At 100,000 it reached 1.085 µs per tick and 922,042 TPS. The toggling shared-net stress case reached 9.030 µs per tick at 50,000 gates and 11.659 µs at 100,000. It continues batching across the workgroup limit, with a visible increase from the GPU-wide commit and shared-net contention.
 
 ## Reproduce
 
@@ -58,12 +62,16 @@ To reproduce the 60 Hz sweep and its two graphs:
 
 ```sh
 ./gradlew -PdesktopOnly :desktop:terniResidentBenchmark \
-  -Psizes=16,32,64,128,200,256 -Psamples=5000 \
+  -Psamples=5000 \
   -Dlogicdraw.terni.library="$PWD/build/terni/liblogicdraw_terni.so" > resident.log 2>&1
 
 python3 benchmarks/classic-vs-terni/plot_resident.py resident.log \
   --hardware 'Ryzen 7 7800X3D + GeForce RTX 4070 Ti'
 ```
+
+To reproduce the connected stress case, use the same commands with
+`-Pconnected=true -Psizes=256,258,512,1000,10000,50000,100000` on Gradle and
+`--connected` on the plotting script.
 
 The plotting scripts require Matplotlib. Adjust the hardware label for the
 machine used in the run.

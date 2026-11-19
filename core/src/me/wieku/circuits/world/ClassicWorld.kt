@@ -111,7 +111,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 		}
 	}
 
-	/** Advance the editor clock. The renderer reads the last published host snapshot. */
+	/** Advance one preview burst and return the number of ticks completed. */
 	@Synchronized
 	fun updatePreviewBatch(tick: Long, count: Int, now: Long = System.nanoTime(),
 		running: () -> Boolean = { true }): Int {
@@ -120,7 +120,8 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 		updateTasks()
 		val previous = lastPreview
 		val publish = previous == null || now - previous >= 1_000_000_000L / previewHz
-		if (!buses.hasElements && simulation.evaluateBatch(count, topology, tickables, manager, emptyList(), publish)) {
+		val burst = if (buses.hasElements) 1 else minOf(count, simulation.previewBatchSize(topology, tickables))
+		if (!buses.hasElements && simulation.evaluateBatch(burst, topology, tickables, manager, emptyList(), publish)) {
 			if (publish) {
 				manager.swap()
 				unpublishedTicks = 0
@@ -128,9 +129,9 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 				previewReadbacks++
 			} else {
 				if (unpublishedTicks == 0) unpublishedFrom = tick
-				unpublishedTicks += count
+				unpublishedTicks += burst
 			}
-			return count
+			return burst
 		}
 
 		synchronizeSimulation()

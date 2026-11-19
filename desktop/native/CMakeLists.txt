@@ -32,6 +32,17 @@ foreach(shader IN ITEMS evaluate batch)
   list(APPEND shader_headers "${header}")
 endforeach()
 
+foreach(stage IN ITEMS initialize evaluate commit)
+  string(TOUPPER "${stage}" stage_define)
+  set(header "${CMAKE_CURRENT_BINARY_DIR}/resident_${stage}.inc")
+  add_custom_command(OUTPUT "${header}"
+    COMMAND "${GLSLC}" --target-env=vulkan1.3 -O -mfmt=num "-D${stage_define}"
+            "-I${terni_SOURCE_DIR}/shaders" "${CMAKE_CURRENT_SOURCE_DIR}/resident.comp" -o "${header}"
+    DEPENDS resident.comp "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
+    VERBATIM)
+  list(APPEND shader_headers "${header}")
+endforeach()
+
 add_library(logicdraw_terni SHARED bridge.cpp ${shader_headers})
 target_link_libraries(logicdraw_terni PRIVATE Terni::runtime)
 target_include_directories(logicdraw_terni PRIVATE ${JNI_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}")

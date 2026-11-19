@@ -170,9 +170,9 @@ private fun verify() {
 	}
 }
 
-private fun verifyReduction(batched: Boolean = false) {
-	val cpu = ClassicWorld(50, 20, "reduction", ClassicSimulation)
-	val gpu = ClassicWorld(50, 20, "reduction", TerniSimulation(software, checkOrder = true))
+private fun verifyReduction(batched: Boolean = false, wide: Boolean = false) {
+	val cpu = ClassicWorld(if (wide) 280 else 50, if (wide) 24 else 20, "reduction", ClassicSimulation)
+	val gpu = ClassicWorld(if (wide) 280 else 50, if (wide) 24 else 20, "reduction", TerniSimulation(software, checkOrder = true))
 	try {
 		for (world in listOf(cpu, gpu)) {
 			// Every 4-input truth table. Mirror empty inputs on a second row.
@@ -187,6 +187,12 @@ private fun verifyReduction(batched: Boolean = false) {
 			}
 			world.place(2, 16, "nor")
 			for (x in 3..9) world.place(x, 16, "wire")
+			// Separate the two drivers by more than one shader workgroup.
+			if (wide) {
+				for (y in 17..20) world.place(5, y, "wire")
+				for (x in 6..275) world.place(x, 20, "wire")
+				repeat(256) { world.place(20 + it, 21, "or") }
+			}
 			world.place(10, 16, "or")
 			world.place(2, 17, "input")
 			world.place(2, 18, "wire")
@@ -212,6 +218,7 @@ private fun verifyReduction(batched: Boolean = false) {
 			}
 			val mode = if (batched) "batched" else "net reduction"
 			check(gpu.simulationStatus.contains("($mode)")) { gpu.simulationStatus }
+			if (wide) check(gpu.simulationStatus.contains("multi-workgroup")) { gpu.simulationStatus }
 			checkState(cpu, gpu, tick.toLong())
 		}
 		val mode = if (batched) "Batch shader" else "Net reduction"
@@ -430,7 +437,7 @@ fun main(args: Array<String>) {
 	} else if (args.isNotEmpty() && args[0] == "batch") {
 		benchmarkBatches(software, args[1].toInt())
 	} else if (args.isNotEmpty() && args[0] == "resident") {
-		benchmarkResident(args[1].split(',').map { it.toInt() }, software, args[2].toInt())
+		benchmarkResident(args[1].split(',').map { it.toInt() }, software, args[2].toInt(), args[3].toBoolean())
 	} else if (args.isNotEmpty() && args[0] == "benchmark") {
 		val ticks = args[2].toInt()
 		require(ticks > 0)
@@ -445,8 +452,11 @@ fun main(args: Array<String>) {
 		verify()
 		verifyReduction()
 		verifyReduction(batched = true)
+		verifyReduction(batched = true, wide = true)
 		verifyBatches(software)
 		verifyPreviewCadence(software)
+		verifyPreviewCadence(software, gates = 512)
+		verifyPreviewCadence(software, gates = 512, connected = true)
 		verifySequentialEdges()
 		verifyBusParity(software)
 		verifyFallback()

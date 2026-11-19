@@ -106,7 +106,7 @@ For a desktop-only build, use `./gradlew -PdesktopOnly desktop:run`. See the [Te
 
 See [headless simulation, save migration, and buses](docs/circuits.md) for the circuit API, CLI, and wiring rules.
 
-The [Classic vs. Terni benchmark](benchmarks/classic-vs-terni/README.md) compares tick latency and throughput from 1,000 to 1,000,000 gates, with charts, measurements, and reproduction commands.
+The [Classic vs. Terni benchmark](benchmarks/classic-vs-terni/README.md) compares tick latency and throughput from 16 to 1,000,000 gates with 60 Hz preview enabled. It includes charts, raw measurements, and reproduction commands.
 
 ## Example circuits
 

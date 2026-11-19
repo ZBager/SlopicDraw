@@ -1,0 +1,60 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "terni/compute.glsl"
+
+layout(constant_id = 2) const uint gateCount = 0;
+layout(constant_id = 3) const uint stateCount = 0;
+
+layout(std430, binding = 0) readonly buffer GateRows { int gates[]; };
+layout(std430, binding = 1) readonly buffer InputPins { int pins[]; };
+layout(std430, binding = 2) readonly buffer Destinations { int writes[]; };
+layout(std430, binding = 3) readonly buffer Initial { uint initial[]; };
+layout(std430, binding = 5) buffer Signals { uint current[]; };
+layout(std430, binding = 6) buffer DriverFlags { uint flags[]; };
+
+uint level(int index) {
+    return index < 0 ? 0u : current[index];
+}
+
+void main() {
+#if defined(INITIALIZE)
+    FOR_EACH(i, stateCount) {
+        uint value = initial[i];
+        current[i] = value & 1u;
+        uint pending = (value >> 1) & 1u;
+        // Bit 2 marks the host's pending value, used when no gate drives this state.
+        flags[i] = 4u | (pending << 3) | ((value & 4u) != 0 ? 2u | pending : 0u);
+    }
+#elif defined(COMMIT)
+    FOR_EACH(i, stateCount) {
+        uint written = flags[i];
+        if ((written & 2u) != 0) current[i] = written & 1u;
+        else if ((written & 4u) != 0) current[i] = written >> 3;
+        flags[i] = 0;
+    }
+#else
+    FOR_EACH(row, gateCount) {
+        uint base = row * 5;
+        int op = gates[base];
+        bool all = op < 2;
+        bool parity = op >= 4;
+        bool value = all && gates[base + 1] >= 0;
+        for (uint pin = 0; pin < 4; ++pin) {
+            int inputRow = gates[base + 1 + pin];
+            if (inputRow < 0 || (!parity && value != all)) break;
+            uint index = uint(inputRow) * 4;
+            uint signal = level(pins[index]) | level(pins[index + 1]) |
+                          level(pins[index + 2]) | level(pins[index + 3]);
+            bool high = (signal ^ initial[stateCount + uint(inputRow)]) != 0;
+            atomicOr(flags[writes[gateCount * 5 + uint(inputRow)]], 2u | uint(high));
+            value = parity ? value != high : high;
+        }
+        uint driven = 2u | uint(value != ((op & 1) != 0));
+        atomicOr(flags[writes[base]], driven);
+        for (uint pin = 1; pin <= 4; ++pin) {
+            int sink = writes[base + pin];
+            if (sink >= 0) atomicOr(flags[sink], driven);
+        }
+    }
+#endif
+}

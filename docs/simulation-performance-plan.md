@@ -40,7 +40,15 @@ Keep ordered CPU replay as the baseline for flip-flops, delays, PWM, buses, RAM 
 
 Use the same seeded circuit for Classic, current Terni and the optimized path. Compare current and pending signals, sequential state, shared drivers, crossed wires and buses, feedback, edits, save/load and switching backends. Compare the optimized output at every tick in diagnostic mode, and at scheduled snapshots in normal mode. Run on hardware Vulkan and lavapipe. Profile the topology rebuild separately so the throughput work does not make live editing less responsive.
 
-## Small-circuit batch prototype
+## Adaptive GPU-resident batching
+
+The editor now uses parallel shared-memory workgroups for independent parts of
+a circuit and a staged GPU-wide commit when a component exceeds a workgroup's
+capacity. Both paths support preview snapshots at 20 or 60 Hz. The [60 Hz
+sweeps](../benchmarks/classic-vs-terni/README.md#60-hz-resident-preview-sweep)
+measure both independent and connected circuits.
+
+## Original small-circuit implementation
 
 The opt-in desktop headless path runs up to 256 dependent ticks in one
 Terni workgroup for circuits eligible for net reduction with up to 256

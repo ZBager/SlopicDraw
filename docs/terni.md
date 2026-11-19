@@ -37,12 +37,20 @@ CMake fetches [Terni at revision `7b2e534b2b80a147f903c6d85f09806ffd17e318`](htt
 The desktop distribution JAR accepts the same JVM properties before `-jar`. The native library can be specified by an absolute path or found with `java.library.path` when `logicdraw.terni.library` is omitted. If the bridge, driver, or native tick fails, LogicDraw reports the reason and uses Classic in that world. Reopen the project to retry. Add `-Dlogicdraw.terni.software=true` to permit a CPU Vulkan device for testing. The title identifies the device type, backend mode, sampled net count, accelerated gate count, simulation time and GPU compute time. It also shows the editor's current tick rate, FPS, and total allocated state nodes.
 
 
-For small circuits eligible for batched Terni, open the gear icon next to
-the clock controls and set **Terni preview refresh** to **20 Hz** or **60 Hz**.
-This limits routine GPU readbacks independently of the **Tickrate** field.
-The preview can miss activity between snapshots. Pausing and stepping
-synchronize exact state. See the [performance plan](simulation-performance-plan.md)
-for batch limits and behavior.
+For circuits eligible for resident Terni simulation, open the gear icon next
+to the clock controls and set **Terni preview refresh** to **20 Hz** or
+**60 Hz**. This limits routine GPU readbacks independently of the **Tickrate**
+field. The preview can miss activity between snapshots. Pausing, stepping,
+saving, and editing synchronize exact state.
+
+The shared-memory shader handles up to 256 gates and 2,048 addressed states
+per workgroup. Larger circuits use multiple copies of this shader when the
+topology can be packed into independent workgroups. If a connected component
+exceeds either limit, Terni uses staged gate evaluation and GPU-wide net commit.
+That path supports up to 32 ticks per submission. On larger boards, the burst
+size starts from the state count and adapts to measured dispatch time. Preview
+cadence is independent of the burst size. Mixed circuits and scheduled external
+drives on larger boards use the existing ordered execution path.
 
 ## How it works
 

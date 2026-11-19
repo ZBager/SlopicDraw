@@ -2,6 +2,7 @@
 #include <terni/compute_runner.hpp>
 #include <terni/vk_context.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <iterator>
 #include <locale>
@@ -17,6 +18,16 @@ constexpr uint32_t shader[] = {
 constexpr uint32_t batch_shader[] = {
 #include "batch.inc"
 };
+constexpr uint32_t resident_initialize[] = {
+#include "resident_initialize.inc"
+};
+constexpr uint32_t resident_evaluate[] = {
+#include "resident_evaluate.inc"
+};
+constexpr uint32_t resident_commit[] = {
+#include "resident_commit.inc"
+};
+constexpr int max_resident_ticks = 32;
 constexpr unsigned max_batch_ticks = 256;
 constexpr unsigned max_batch_drives = 4096;
 constexpr unsigned schedule_words = 3 + max_batch_ticks + max_batch_drives * 2;
@@ -27,6 +38,8 @@ struct Circuit {
     std::vector<jint> signals;
     uint32_t result_count = 0;
     uint32_t readback = 0;
+    bool multi_workgroup = false;
+    bool partitioned = false;
     std::vector<jint> schedule;
     uint64_t ticks = 0;
     double native_ms = 0;
@@ -198,18 +211,18 @@ JNIEXPORT jdouble JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_
     });
 }
 
-JNIEXPORT jlong JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_createBatch(
+JNIEXPORT jlong JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_createResidentBatch(
     JNIEnv* env, jobject, jintArray gates, jintArray pins, jintArray writes,
-    jint state_count, jboolean allow_software) {
+    jint state_count, jintArray partitions, jint groups, jboolean allow_software) {
     return checked<jlong>(env, [&] {
         const auto gate_rows = copy(env, gates);
         auto input_rows = copy(env, pins);
         const auto destinations = copy(env, writes);
         const size_t gate_count = gate_rows.size() / 5;
         const size_t input_count = input_rows.size() / 4;
-        if (gate_count < 1 || gate_count > 256 || gate_rows.size() % 5 || input_rows.size() % 4 ||
+        if (gate_count < 1 || gate_rows.size() % 5 || input_rows.size() % 4 ||
             destinations.size() != gate_rows.size() + input_count ||
-            state_count < 1 || state_count > 2048)
+            state_count < 1)
             throw std::invalid_argument("Invalid batch circuit dimensions");
         for (size_t i = 0; i < gate_rows.size(); ++i) {
             const jint value = gate_rows[i];
@@ -232,7 +245,14 @@ JNIEXPORT jlong JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_cr
         sim->schedule.resize(schedule_words);
         const std::vector<jint> output(state_count);
         const uint64_t result_bytes = output.size() * sizeof(jint);
-        const std::vector<terni::ComputeBufferSpec> buffers{
+        auto layout = copy(env, partitions);
+        sim->partitioned = groups > 0;
+        sim->multi_workgroup = !sim->partitioned && (gate_count > 256 || state_count > 2048);
+        if (groups < 0 || (sim->partitioned &&
+            layout.size() != size_t(state_count) * 2 + size_t(groups) * 4 + gate_count))
+            throw std::invalid_argument("Invalid batch partition dimensions");
+        if (layout.empty()) layout.push_back(0);
+        std::vector<terni::ComputeBufferSpec> buffers{
             {"gates", gate_rows.data(), gate_rows.size() * sizeof(jint)},
             {"pins", input_rows.data(), input_rows.size() * sizeof(jint)},
             {"destinations", destinations.data(), destinations.size() * sizeof(jint)},
@@ -240,12 +260,28 @@ JNIEXPORT jlong JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_cr
             {"schedule", sim->schedule.data(), sim->schedule.size() * sizeof(jint)},
             {"results", output.data(), result_bytes}
         };
-        const std::vector<terni::ComputeStageSpec> stages{
-            {"batch", 1, {std::begin(batch_shader), std::end(batch_shader)}, {}}
-        };
-        const std::vector<terni::ComputeSpecConstant> constants{
+        std::vector<terni::ComputeStageSpec> stages;
+        if (sim->multi_workgroup) {
+            buffers.push_back({"flags", output.data(), result_bytes});
+            stages.push_back({"initialize", uint32_t(state_count),
+                {std::begin(resident_initialize), std::end(resident_initialize)}, {}});
+            const terni::ComputeStageSpec evaluate{"evaluate", uint32_t(gate_count),
+                {std::begin(resident_evaluate), std::end(resident_evaluate)}, {}};
+            const terni::ComputeStageSpec commit{"commit", uint32_t(state_count),
+                {std::begin(resident_commit), std::end(resident_commit)}, {}};
+            for (int i = 0; i < max_resident_ticks; ++i) {
+                stages.push_back(evaluate);
+                stages.push_back(commit);
+            }
+        } else {
+            buffers.push_back({"partitions", layout.data(), layout.size() * sizeof(jint)});
+            stages.push_back({"batch", uint32_t(sim->partitioned ? groups * 256u : 1),
+                {std::begin(batch_shader), std::end(batch_shader)}, {}});
+        }
+        std::vector<terni::ComputeSpecConstant> constants{
             {2, uint32_t(gate_count)}, {3, uint32_t(state_count)}
         };
+        if (!sim->multi_workgroup) constants.push_back({4, uint32_t(sim->partitioned)});
         sim->runner = std::make_unique<terni::ComputeRunner>(
             device.index, false, "", buffers, stages, std::vector<uint32_t>{}, false, constants);
         sim->readback = sim->runner->add_tick_readback(5, result_bytes);
@@ -281,6 +317,26 @@ JNIEXPORT jdouble JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_
                 if (sim.schedule[i] < 0 || uint32_t(sim.schedule[i]) >= sim.result_count ||
                     (sim.schedule[i + 1] != 2 && sim.schedule[i + 1] != 3))
                     throw std::invalid_argument("Invalid batch schedule drive");
+        }
+        if ((sim.multi_workgroup || sim.partitioned) && drives != 0)
+            throw std::invalid_argument("Multi-workgroup batches do not accept scheduled drives");
+        if (sim.multi_workgroup) {
+            if (!resume) sim.runner->queue_write(3, sim.signals.data(), sim.signals.size() * sizeof(jint));
+            double gpu_ms = 0;
+            for (int offset = 0; offset < ticks;) {
+                const int count = std::min(max_resident_ticks, ticks - offset);
+                std::vector<bool> run(1 + 2 * max_resident_ticks, false);
+                run[0] = offset == 0 && !resume;
+                std::fill(run.begin() + 1, run.begin() + 1 + 2 * count, true);
+                offset += count;
+                sim.runner->set_tick_readback_bytes(sim.readback,
+                    publish && offset == ticks ? sim.result_count * sizeof(jint) : 0);
+                sim.runner->tick(run);
+                gpu_ms += sim.runner->last_tick_gpu_ms();
+            }
+            if (publish) env->SetIntArrayRegion(results, 0, jsize(sim.result_count),
+                static_cast<const jint*>(sim.runner->tick_readback(sim.readback)));
+            return gpu_ms;
         }
         if (resume) sim.schedule[0] |= 0x10000;
         else sim.runner->queue_write(3, sim.signals.data(), sim.signals.size() * sizeof(jint));

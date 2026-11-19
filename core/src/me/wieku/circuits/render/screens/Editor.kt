@@ -858,7 +858,15 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTickBatch {
 		if (world.supportsPreviewBatches) (tickRate / 1000).coerceIn(1, MAX_BATCH_TICKS) else 1
 
 	override fun advance(tick: Long, count: Int, running: () -> Boolean): Int {
-		if (world.supportsPreviewBatches) return world.updatePreviewBatch(tick, count, running = running)
+		if (world.supportsPreviewBatches) {
+			var completed = 0
+			while (completed < count && running()) {
+				val advanced = world.updatePreviewBatch(tick + completed, count - completed, running = running)
+				if (advanced == 0) break
+				completed += advanced
+			}
+			return completed
+		}
 		if (!running()) return 0
 		world.update(tick)
 		return 1

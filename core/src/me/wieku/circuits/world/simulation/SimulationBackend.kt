@@ -17,6 +17,9 @@ interface SimulationBackend {
 	fun evaluate(tick: Long, topology: Long, gates: MappedArray<Vector2i, ITickable>, states: StateManager)
 	val supportsPreviewBatches: Boolean get() = false
 
+	// Choose the next preview burst, independently of the clock's total tick budget.
+	fun previewBatchSize(topology: Long, gates: MappedArray<Vector2i, ITickable>): Int = MAX_BATCH_TICKS
+
 	// A published snapshot goes in output for the world's normal commit. An unpublished
 	// batch retains its results on the device. On false, leave host state untouched.
 	fun evaluateBatch(count: Int, topology: Long, gates: MappedArray<Vector2i, ITickable>,
