@@ -61,7 +61,7 @@ object SaveManagers {
 		var outputStream = DataOutputStream(GZIPOutputStream(FileOutputStream(file)))
 		outputStream.writeUTF("LogicDraw Map")
 		outputStream.writeInt(latest)
-		getSaveManager(latest).saveMap(world, outputStream)
+		synchronized(world) { getSaveManager(latest).saveMap(world, outputStream) }
 		outputStream.close()
 		println("Saved!")
 	}
@@ -72,7 +72,7 @@ object SaveManagers {
 		var outputStream = DataOutputStream(GZIPOutputStream(FileOutputStream(file)))
 		outputStream.writeUTF("LogicDraw Blueprint")
 		outputStream.writeInt(latest)
-		getSaveManager(latest).saveMap(world, outputStream)
+		synchronized(world) { getSaveManager(latest).saveMap(world, outputStream) }
 		outputStream.close()
 		println("Saved!")
 	}

@@ -2,24 +2,52 @@ package me.wieku.circuits.world
 
 import com.google.common.eventbus.EventBus
 import me.wieku.circuits.api.collections.Array2D
+import me.wieku.circuits.api.collections.MappedArray
 import me.wieku.circuits.api.element.IElement
 import me.wieku.circuits.api.element.ITickable
 import me.wieku.circuits.api.element.edit.Copyable
 import me.wieku.circuits.api.math.Direction
-import me.wieku.circuits.api.collections.MappedArray
 import me.wieku.circuits.api.math.Rectangle
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.state.StateManager
 import me.wieku.circuits.api.world.IWorld
 import me.wieku.circuits.api.world.clock.AsyncClock
-import java.util.*
+import me.wieku.circuits.world.simulation.SimulationBackend
+import me.wieku.circuits.world.simulation.SimulationBackends
+import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentLinkedQueue
 
-class ClassicWorld(val width: Int, val height: Int, val name: String):IWorld {
+class ClassicWorld(val width: Int, val height: Int, val name: String,
+		backend: SimulationBackend = SimulationBackends.create()):IWorld {
 	private val manager: ClassicStateManager = ClassicStateManager(width * height)
 	private val map: Array2D<IElement?> = Array2D(width, height)
 	private val tickables = MappedArray<Vector2i, ITickable>(width * height)
 
-	private val tasks = ArrayDeque<Runnable>()
+	private val tasks = ConcurrentLinkedQueue<Runnable>()
+	@Volatile private var simulation = backend
+	private var topology = 0L
+	private var simulationClosed = false
+	val simulationStatus get() = simulation.status
+
+	@Synchronized
+	fun setSimulationBackend(backend: SimulationBackend) {
+		if (simulation !== backend) simulation.close()
+		simulation = backend
+		simulationClosed = false
+	}
+
+	@Synchronized
+	fun openSimulation() {
+		simulationClosed = false
+	}
+
+	@Synchronized
+	fun closeSimulation() {
+		simulationClosed = true
+		simulation.close()
+	}
+
+	fun postInput(event: Any) = synchronized(this) { eventBus.post(event) }
 	val eventBus = EventBus("buttons")
 
 	var clock: AsyncClock? = null
@@ -28,14 +56,17 @@ class ClassicWorld(val width: Int, val height: Int, val name: String):IWorld {
 	get() = tickables.currentElements
 	private set
 
+	@Synchronized
 	override fun update(tick: Long) {
+		if (simulationClosed) return
 		updateTasks()
-		for(i in 0 until tickables.size) tickables[i]?.update(tick)
+		simulation.evaluate(tick, topology, tickables, manager)
 		manager.swap()
 	}
 
+	@Synchronized
 	fun updateTasks() {
-		while(tasks.isNotEmpty()) tasks.poll().run()
+		while (true) (tasks.poll() ?: break).run()
 	}
 
 	override fun placeElement(position: Vector2i, name: String) {
@@ -68,6 +99,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String):IWorld {
 			} else return
 		}
 		var el:IElement = ElementRegistry.create(clazz, position)
+		++topology
 		map[position.x][position.y] = el
 		el.onPlace(this)
 		if(el is ITickable) {
@@ -75,10 +107,12 @@ class ClassicWorld(val width: Int, val height: Int, val name: String):IWorld {
 		}
 	}
 
+	@Synchronized
 	fun forcePlace(x: Int, y: Int, name: String): IElement {
 		if(ElementRegistry.contains(name)) {
 			var position = Vector2i(x, y)
 			var el:IElement = ElementRegistry.create(name, position)
+			++topology
 			map[position.x][position.y] = el
 			if(el is ITickable) {
 				tickables.put(position, el)
@@ -148,6 +182,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String):IWorld {
 		})
 	}
 
+	@Synchronized
 	fun stackNT(rectangle: Rectangle, direction: Direction, amount: Int) {
 		val clipboard = WorldClipboard.create(rectangle, this)
 		val vec = direction.asVector
@@ -159,6 +194,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String):IWorld {
 		}
 	}
 
+	@Synchronized
 	fun pasteNT(position: Vector2i, clipboard: WorldClipboard) {
 		clearNT(Rectangle(position, Vector2i(position.x+clipboard.width, position.y + clipboard.height)))
 		for(x in 0 until clipboard.width) {
@@ -196,6 +232,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String):IWorld {
 	private fun removeElementNT(position: Vector2i) {
 		if(!position.isInBounds(0, 0, width-1, height-1)) return
 		var element: IElement? = map[position.x][position.y] ?: return
+		++topology
 		tickables.remove(position)
 		map[position.x][position.y] = null
 		element!!.onRemove(this)

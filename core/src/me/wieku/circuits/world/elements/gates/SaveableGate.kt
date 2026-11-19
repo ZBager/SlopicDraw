@@ -14,6 +14,11 @@ abstract class SaveableGate(pos: Vector2i): BasicGate(pos), Saveable, Copyable {
 
 	protected var state: State? = null
 
+	fun applySimulationResult(value: Boolean) {
+		state!!.setActiveU(value)
+		setOut(value)
+	}
+
 	override fun onPlace(world: IWorld) {
 		super.onPlace(world)
 		state = world.getStateManager()()

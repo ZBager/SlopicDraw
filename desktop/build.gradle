@@ -54,3 +54,49 @@ task afterEclipseImport(description: "Post processing after project generation",
     printer.print(classpath)
   }
 }
+
+sourceSets.test.java.srcDirs = ["test"]
+
+def terniProperties = System.properties.findAll { key, value ->
+    key == "logicdraw.backend" || key.startsWith("logicdraw.terni.")
+}
+[run, debug].each { it.systemProperties terniProperties }
+
+task terniCheck(type: JavaExec, dependsOn: testClasses) {
+    main = "me.wieku.circuits.desktop.simulation.TerniHarnessKt"
+    classpath = sourceSets.test.runtimeClasspath
+    systemProperties terniProperties
+    args rootProject.file("android/assets/maps/test.ldmap").absolutePath
+}
+
+task terniBenchmark(type: JavaExec, dependsOn: testClasses) {
+    main = terniCheck.main
+    classpath = sourceSets.test.runtimeClasspath
+    systemProperties terniProperties
+    args "benchmark", (project.findProperty("sizes") ?: "1000,10000,100000,1000000"),
+         (project.findProperty("ticks") ?: "100")
+}
+
+task terniRenderBenchmark(type: JavaExec, dependsOn: testClasses) {
+    main = terniCheck.main
+    classpath = sourceSets.test.runtimeClasspath
+    workingDir = project.assetsDir
+    systemProperties terniProperties
+    args "render", (project.findProperty("size") ?: "100000"),
+         (project.findProperty("backend") ?: "classic"), (project.findProperty("seconds") ?: "5")
+}
+
+task terniNative {
+    group = "build"
+    description = "Build the optional Terni JNI library with CMake"
+    doLast {
+        def out = rootProject.file("build/terni")
+        def configure = ["cmake", "-S", file("native").absolutePath, "-B", out.absolutePath,
+                         "-DCMAKE_BUILD_TYPE=Release"]
+        if (project.hasProperty("terniSource")) {
+            configure += "-DFETCHCONTENT_SOURCE_DIR_TERNI=" + rootProject.file(terniSource).absolutePath
+        }
+        exec { commandLine configure }
+        exec { commandLine "cmake", "--build", out.absolutePath, "--config", "Release" }
+    }
+}

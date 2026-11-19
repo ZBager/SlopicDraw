@@ -1,0 +1,49 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "terni/compute.glsl"
+
+layout(constant_id = 2) const uint gateCount = 0;
+layout(constant_id = 3) const uint netCount = 0;
+
+layout(constant_id = 4) const uint reduceNets = 0;
+
+layout(std430, binding = 0) readonly buffer GateRows { int gates[]; };
+layout(std430, binding = 1) readonly buffer InputRows { uint pins[]; };
+layout(std430, binding = 2) readonly buffer Signals { uint signals[]; };
+layout(std430, binding = 3) buffer Results { uint results[]; };
+layout(std430, binding = 4) readonly buffer Destinations { int writes[]; };
+
+void main() {
+    FOR_EACH(row, gateCount) {
+        uint base = row * 5;
+        int op = gates[base];
+        bool all = op < 2;
+        bool parity = op >= 4;
+        bool value = all && gates[base + 1] >= 0;
+        uint flags = 0;
+        for (uint pin = 0; pin < 4; ++pin) {
+            int inputRow = gates[base + 1 + pin];
+            if (inputRow < 0 || (!parity && value != all)) break;
+
+            uint index = uint(inputRow) * 4;
+            uint signal = signals[pins[index]] | signals[pins[index + 1]] |
+                          signals[pins[index + 2]] | signals[pins[index + 3]];
+            bool pinHigh = (signal ^ signals[netCount + uint(inputRow)]) != 0;
+            if (reduceNets != 0)
+                atomicOr(results[writes[gateCount * 5 + uint(inputRow)]], 2u | uint(pinHigh));
+            else
+                flags |= (2u | (pinHigh ? 32u : 0u)) << pin;
+            value = parity ? value != pinHigh : pinHigh;
+        }
+        uint high = uint(value != ((op & 1) != 0));
+        if (reduceNets != 0) {
+            results[writes[base]] = 2u | high;
+            for (uint pin = 1; pin <= 4; ++pin) {
+                int dest = writes[base + pin];
+                if (dest >= 0) atomicOr(results[dest], 2u | high);
+            }
+        } else {
+            results[row] = flags | high;
+        }
+    }
+}

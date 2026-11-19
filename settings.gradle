@@ -1,2 +1,4 @@
-include 'desktop', 'android', 'ios', 'core', 'version'
-
+include 'desktop', 'core', 'version'
+if (!gradle.startParameter.projectProperties.containsKey('desktopOnly')) {
+    include 'android', 'ios'
+}

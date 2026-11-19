@@ -7,8 +7,7 @@ class AndGate(pos: Vector2i): SaveableGate(pos) {
 	override fun update(tick: Long) {
 		var calc = inputs.isAllActive()
 
-		state!!.setActiveU(calc)
-		setOut(calc)
+		applySimulationResult(calc)
 	}
 
 	override fun getIdleColor(): Int = 0x00BFA5

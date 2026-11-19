@@ -92,7 +92,7 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 			lastMY = Gdx.input.y
 			brushState = STATE.MOVE
 		} else {
-			world.eventBus.post(KeyDownEvent(world, keycode))
+			world.postInput(KeyDownEvent(world, keycode))
 		}
 
 		return false
@@ -124,7 +124,7 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 				STATE.PASTE
 			} else STATE.NONE
 		} else {
-			world.eventBus.post(KeyUpEvent(world, keycode))
+			world.postInput(KeyUpEvent(world, keycode))
 		}
 
 		return false

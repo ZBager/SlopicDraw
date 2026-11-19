@@ -19,6 +19,12 @@ abstract class BasicGate(pos: Vector2i): BasicElement(pos),ITickable {
 		updateIO(world)
 	}
 
+	fun simulationInputCount() = inputs.size
+	fun simulationInput(index: Int) = inputs.array[index]!!
+
+	fun simulationOutputCount() = outputs.size
+	fun simulationOutput(index: Int) = outputs.array[index]!!
+
 	protected fun setOut(value: Boolean) {
 		outputs.setActive(value)
 	}

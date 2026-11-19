@@ -27,15 +27,17 @@ open class Input(pos: Vector2i):BasicInput(pos), Saveable, Editable, Copyable {
 		for(i in 0 until size) {
 			if(array[i]!!.isActive()) {
 				val intSt = !inverted
-				state!!.setActiveU(intSt)
+				applySimulationRead(intSt)
 				return intSt
 			}
 		}
 
-		state!!.setActiveU(inverted)
+		applySimulationRead(inverted)
 
 		return inverted
 	}
+
+	fun applySimulationRead(value: Boolean) = state!!.setActiveU(value)
 
 	private fun isActiveF(): Boolean {
 		for(i in 0 until size) {

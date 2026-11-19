@@ -9,8 +9,10 @@ buildscript {
     }
     dependencies {
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion"
-        classpath 'com.android.tools.build:gradle:2.2.0'
-        classpath 'com.mobidevelop.robovm:robovm-gradle-plugin:2.3.1'
+        if (!gradle.startParameter.projectProperties.containsKey('desktopOnly')) {
+            classpath 'com.android.tools.build:gradle:2.2.0'
+            classpath 'com.mobidevelop.robovm:robovm-gradle-plugin:2.3.1'
+        }
 
     }
 }
@@ -72,7 +74,7 @@ project(":desktop") {
     }
 }
 
-project(":android") {
+if (findProject(":android") != null) project(":android") {
     apply plugin: "android"
     apply plugin: "kotlin-android"
 
@@ -96,7 +98,7 @@ project(":android") {
     }
 }
 
-project(":ios") {
+if (findProject(":ios") != null) project(":ios") {
     apply plugin: "kotlin"
     apply plugin: "robovm"
 

@@ -7,8 +7,7 @@ class XnorGate(pos: Vector2i): SaveableGate(pos) {
 	override fun update(tick: Long) {
 		var calc = inputs.isXORActive()
 
-		state!!.setActiveU(!calc)
-		setOut(!calc)
+		applySimulationResult(!calc)
 	}
 
 	override fun getIdleColor(): Int = 0x880E4F

@@ -57,7 +57,7 @@ import java.util.*
 class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 	private lateinit var mainClock: AsyncClock
-	private var tickrate = 0L
+	@Volatile private var tickrate = 0L
 
 	private var manipulator: MapManipulator
 
@@ -640,6 +640,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 
 	override fun show() {
+		world.openSimulation()
 		mainClock = AsyncClock(this, 1000)
 		world.clock = mainClock
 		mainClock.start()
@@ -669,7 +670,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 		delta1 += delta
 		if (delta1 >= 1f) {
-			Gdx.graphics.setTitle("LogicDraw ${Version.version} (world: ${world.name}) (tickrate: $tickrate) (fps: ${Gdx.graphics.framesPerSecond}) (${world.getStateManager().usedNodes} nodes) (${world.entities} entities) | $lastSave")
+			Gdx.graphics.setTitle("LogicDraw ${Version.version} (world: ${world.name}) (tickrate: ${if (mainClock.isRunning()) tickrate else 0}) (fps: ${Gdx.graphics.framesPerSecond}) (${world.getStateManager().usedNodes} nodes) (${world.entities} entities) [${world.simulationStatus}] | $lastSave")
 			delta1 = 0f
 		}
 
@@ -777,7 +778,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 	}
 
 	override fun dispose() {
-		mainClock.stop()
+		hide()
 		renderer.dispose()
 	}
 
@@ -871,10 +872,12 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 					val okButton = textButton("OK").cell(growX = true)
 					okButton.onClickS {
-						spinners.forEach { t, u -> u.setInt(element, (t.model as IntSpinnerModel).value) }
-						radioButtons.forEach { t, u -> u.setBoolean(element, t.isChecked) }
-						keySelectors.forEach { t, u -> u.setInt(element, keyStore[t]!!) }
-						hexEditors.forEach { t, u -> u.set(element, t.saveToBytes()) }
+						synchronized(world) {
+							spinners.forEach { t, u -> u.setInt(element, (t.model as IntSpinnerModel).value) }
+							radioButtons.forEach { t, u -> u.setBoolean(element, t.isChecked) }
+							keySelectors.forEach { t, u -> u.setInt(element, keyStore[t]!!) }
+							hexEditors.forEach { t, u -> u.set(element, t.saveToBytes()) }
+						}
 						fadeOut()
 					}
 
@@ -912,7 +915,10 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 		}
 	}
 
-	override fun hide() {}
+	override fun hide() {
+		mainClock.stop()
+		world.closeSimulation()
+	}
 
 	override fun pause() {
 		manipulator.pause = true

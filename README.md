@@ -102,6 +102,8 @@ It's.. complicated. Try reading https://gist.github.com/magik6k/d1a739a5f032e93a
 ## How to run it
 To run the project, just type: `./gradlew desktop:run` (`gradlew desktop:run` on Windows CMD)
 
+For a desktop-only build, use `./gradlew -PdesktopOnly desktop:run`. See the [Terni backend guide](docs/terni.md) for optional Vulkan simulation, tests, and benchmarks.
+
 ## Example circuits
 
 BCD adder:
