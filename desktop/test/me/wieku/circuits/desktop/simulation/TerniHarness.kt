@@ -439,6 +439,7 @@ fun main(args: Array<String>) {
 		verify()
 		verifyReduction()
 		verifySequentialEdges()
+		verifyBusParity(software)
 		verifyFallback()
 		if (args.isNotEmpty()) verifyLegacySave(File(args[0]))
 	}

@@ -3,28 +3,38 @@ package me.wieku.circuits.save.managers
 import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.ClassicStateManager
 import me.wieku.circuits.save.SaveManager
+import me.wieku.circuits.save.SaveManagers
 import me.wieku.circuits.save.Saveable
 import me.wieku.circuits.world.ElementRegistry
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
 
 class SaveManagerVer01 : SaveManager {
 
 	private lateinit var inputStream: DataInputStream
 	private lateinit var outputStream: DataOutputStream
+	private var maxPayloadBytes = Int.MAX_VALUE
 
 	override fun loadHeader(file: DataInputStream): Array<String> {
 		return arrayOf(file.readUTF(), file.readUTF(), file.readUTF())
 	}
 
-	override fun loadMap(file: DataInputStream): ClassicWorld {
+	override fun loadMap(file: DataInputStream): ClassicWorld = loadMap(file, Int.MAX_VALUE)
+
+	internal fun loadMap(file: DataInputStream, maxCells: Int, maxPayloadBytes: Int = Int.MAX_VALUE): ClassicWorld {
 		inputStream = file
+		this.maxPayloadBytes = maxPayloadBytes
 		file.readUTF()
 		file.readUTF()
 		file.readUTF()
 		var name = file.readUTF()
 		println("World name: $name")
-		var world = ClassicWorld(file.readInt(), file.readInt(), name)
+		val width = file.readInt()
+		val height = file.readInt()
+		if (width <= 0 || height <= 0 || width.toLong() * height > maxCells)
+			throw IOException("Unsupported map dimensions for this load.")
+		val world = ClassicWorld(width, height, name)
 
 		println("World size: ${world.width}x${world.height}")
 
@@ -35,7 +45,7 @@ class SaveManagerVer01 : SaveManager {
 		var counter = file.readInt()
 		println("Loading $counter elements started...")
 		while (counter>0) {
-			var element = world.forcePlace(file.readInt(), file.readInt(), file.readUTF())
+			var element = SaveManagers.placeSavedElement(world, file)
 			if (element is Saveable) {
 				(element as Saveable).load(world, this)
 			}
@@ -109,6 +119,11 @@ class SaveManagerVer01 : SaveManager {
 	override fun getBoolean(): Boolean = inputStream.readByte() == (1).toByte()
 
 	override fun getByte(): Byte = inputStream.readByte()
+
+	override fun getBytes(size: Int): ByteArray {
+		if (size !in 0..maxPayloadBytes) throw IOException("Invalid or oversized block payload.")
+		return ByteArray(size).also { inputStream.readFully(it) }
+	}
 
 	override fun getInteger(): Int = inputStream.readInt()
 

@@ -1,6 +1,6 @@
 package me.wieku.circuits.save.managers
 
-import me.wieku.circuits.save.SaveManager
+import me.wieku.circuits.save.SaveManagers
 import me.wieku.circuits.save.Saveable
 import me.wieku.circuits.world.ClassicStateManager
 import me.wieku.circuits.world.ClassicWorld
@@ -8,10 +8,7 @@ import me.wieku.circuits.world.ElementRegistry
 import java.io.DataInputStream
 import java.io.DataOutputStream
 
-class SaveManagerVer02 : SaveManager {
-
-	private lateinit var inputStream: DataInputStream
-	private lateinit var outputStream: DataOutputStream
+class SaveManagerVer02 : StreamSaveManager() {
 
 	override fun loadHeader(file: DataInputStream): Array<String> {
 		return arrayOf(file.readUTF(), file.readInt().toString(), file.readInt().toString())
@@ -38,7 +35,7 @@ class SaveManagerVer02 : SaveManager {
 		var counter = file.readInt()
 		println("Loading $counter elements started...")
 		while (counter>0) {
-			world.forcePlace(file.readInt(), file.readInt(), file.readUTF())
+			SaveManagers.placeSavedElement(world, file)
 			--counter
 		}
 
@@ -108,36 +105,6 @@ class SaveManagerVer02 : SaveManager {
 			}
 		}
 	}
-
-	override fun putBoolean(value: Boolean) {
-		outputStream.writeByte(if(value) 1 else 0)
-	}
-
-	override fun putByte(value: Byte) {
-		outputStream.writeByte(value.toInt())
-	}
-
-	override fun putInteger(value: Int) {
-		outputStream.writeInt(value)
-	}
-
-	override fun putLong(value: Long) {
-		outputStream.writeLong(value)
-	}
-
-	override fun putString(value: String) {
-		outputStream.writeUTF(value)
-	}
-
-	override fun getBoolean(): Boolean = inputStream.readByte() == (1).toByte()
-
-	override fun getByte(): Byte = inputStream.readByte()
-
-	override fun getInteger(): Int = inputStream.readInt()
-
-	override fun getLong(): Long = inputStream.readLong()
-
-	override fun getString(): String = inputStream.readUTF()
 
 	override fun getVersion(): Int = 2
 }

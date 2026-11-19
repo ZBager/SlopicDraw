@@ -18,6 +18,7 @@ interface SaveManager {
 
 	fun getBoolean(): Boolean
 	fun getByte(): Byte
+	fun getBytes(size: Int): ByteArray = ByteArray(size) { getByte() }
 	fun getInteger(): Int
 	fun getLong(): Long
 	fun getString(): String

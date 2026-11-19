@@ -3,7 +3,6 @@ package me.wieku.circuits.world.elements.gates
 import com.badlogic.gdx.math.MathUtils
 import me.wieku.circuits.api.element.BasicInput
 import me.wieku.circuits.api.element.BasicWire
-import me.wieku.circuits.api.element.edit.Editable
 import me.wieku.circuits.api.math.Axis
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.world.IWorld
@@ -12,10 +11,9 @@ import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.elements.io.Controller
 import java.util.*
 
-class DelayGate(pos: Vector2i): SaveableGate(pos), Editable {
+class DelayGate(pos: Vector2i): SaveableGate(pos) {
 
-	@Editable.Spinner("Delay", intArrayOf(1, 1, 10000, 1))
-	private var delay = 500
+	internal var delay = 500
 
 	private var counter = 0
 

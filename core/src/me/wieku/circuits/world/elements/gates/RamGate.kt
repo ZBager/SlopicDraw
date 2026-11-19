@@ -2,7 +2,6 @@ package me.wieku.circuits.world.elements.gates
 
 import me.wieku.circuits.api.element.BasicInput
 import me.wieku.circuits.api.element.BasicWire
-import me.wieku.circuits.api.element.edit.Editable
 import me.wieku.circuits.api.element.holders.Inputs
 import me.wieku.circuits.api.math.Axis
 import me.wieku.circuits.api.math.Vector2i
@@ -14,15 +13,14 @@ import kotlin.collections.HashMap
 import kotlin.experimental.and
 
 // spec: https://gist.github.com/magik6k/d1a739a5f032e93aba2742b9fa243a26
-class RamGate(pos: Vector2i): SaveableGate(pos), Editable {
+class RamGate(pos: Vector2i): SaveableGate(pos) {
 	enum class State {
 		IDLE, READ, RESPOND
 	}
 
 	private val segmentSize = 32 // bytes
 
-	@Editable.Hex("Ram")
-	private var memory: ByteArray = ByteArray(1)
+	internal var memory: ByteArray = ByteArray(1)
 		set(value) {
 			field = value
 			// TODO: round size, maybe
@@ -194,10 +192,7 @@ class RamGate(pos: Vector2i): SaveableGate(pos), Editable {
 		cmdBuf = manager.getLong()
 		read = manager.getInteger()
 
-		memory = ByteArray(manager.getInteger())
-		for (i in 0 until memory.size) {
-			memory[i] = manager.getByte()
-		}
+		memory = manager.getBytes(manager.getInteger())
 	}
 
 	override fun save(manager: SaveManager) {

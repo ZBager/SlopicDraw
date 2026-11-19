@@ -5,11 +5,11 @@ import me.wieku.circuits.api.collections.Array2D
 import me.wieku.circuits.api.collections.MappedArray
 import me.wieku.circuits.api.element.IElement
 import me.wieku.circuits.api.element.ITickable
-import me.wieku.circuits.api.element.edit.Copyable
 import me.wieku.circuits.api.math.Direction
 import me.wieku.circuits.api.math.Rectangle
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.state.StateManager
+import me.wieku.circuits.api.simulation.CircuitMetadata
 import me.wieku.circuits.api.world.IWorld
 import me.wieku.circuits.api.world.clock.AsyncClock
 import me.wieku.circuits.world.simulation.SimulationBackend
@@ -26,6 +26,9 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 	private val tasks = ConcurrentLinkedQueue<Runnable>()
 	@Volatile private var simulation = backend
 	private var topology = 0L
+	private val buses = BusNetwork()
+	val hasBusElements get() = buses.hasElements
+	internal var metadata = CircuitMetadata()
 	private var simulationClosed = false
 	val simulationStatus get() = simulation.status
 
@@ -61,12 +64,14 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 		if (simulationClosed) return
 		updateTasks()
 		simulation.evaluate(tick, topology, tickables, manager)
+		buses.commit()
 		manager.swap()
 	}
 
 	@Synchronized
 	fun updateTasks() {
 		while (true) (tasks.poll() ?: break).run()
+		buses.refresh(this, topology)
 	}
 
 	override fun placeElement(position: Vector2i, name: String) {
@@ -101,6 +106,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 		var el:IElement = ElementRegistry.create(clazz, position)
 		++topology
 		map[position.x][position.y] = el
+		buses.place(el)
 		el.onPlace(this)
 		if(el is ITickable) {
 			tickables.put(position, el)
@@ -114,6 +120,7 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 			var el:IElement = ElementRegistry.create(name, position)
 			++topology
 			map[position.x][position.y] = el
+			buses.place(el)
 			if(el is ITickable) {
 				tickables.put(position, el)
 			}
@@ -184,43 +191,50 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 
 	@Synchronized
 	fun stackNT(rectangle: Rectangle, direction: Direction, amount: Int) {
+		if (rectangle.width <= 0 || rectangle.height <= 0) return
 		val clipboard = WorldClipboard.create(rectangle, this)
-		val vec = direction.asVector
-		val tmpVec = Vector2i()
-		for(d in 1..amount) {
-			tmpVec.set(vec).scl(rectangle.width, rectangle.height).scl(d.toFloat()).add(rectangle.x,rectangle.y)
-			if(!tmpVec.isInBounds(0, 0, width, height)) break
-			pasteNT(tmpVec, clipboard)
+		pasteCopies(Vector2i(rectangle.x, rectangle.y), clipboard, direction, 1..amount)
+	}
+
+	fun stackClipboard(position: Vector2i, clipboard: WorldClipboard, direction: Direction, amount: Int) {
+		val origin = position.copy()
+		tasks.add(Runnable { pasteCopies(origin, clipboard, direction, 0 until amount) })
+	}
+
+	private fun pasteCopies(origin: Vector2i, clipboard: WorldClipboard, direction: Direction, copies: IntRange) {
+		val position = Vector2i()
+		val stepX = direction.x * clipboard.width
+		val stepY = direction.y * clipboard.height
+		for (copy in copies) {
+			position.set(origin.x + stepX * copy, origin.y + stepY * copy)
+			if (position.x >= width || position.y >= height ||
+				position.x + clipboard.width <= 0 || position.y + clipboard.height <= 0) break
+			pasteNT(position, clipboard)
 		}
 	}
 
 	@Synchronized
 	fun pasteNT(position: Vector2i, clipboard: WorldClipboard) {
-		clearNT(Rectangle(position, Vector2i(position.x+clipboard.width, position.y + clipboard.height)))
-		for(x in 0 until clipboard.width) {
-			for (y in 0 until clipboard.height) {
-				if(clipboard[x, y] != null) {
-					val pos = Vector2i(x, y).add(position)
-					placeElementNT(pos, clipboard[x, y]!!.javaClass)
-				} else
-					removeElementNT(Vector2i(x, y).add(position))
+		val left = maxOf(0, position.x)
+		val top = maxOf(0, position.y)
+		val right = minOf(width, position.x + clipboard.width)
+		val bottom = minOf(height, position.y + clipboard.height)
+		if (left >= right || top >= bottom) return
+
+		clearNT(Rectangle(left, top, right, bottom))
+		for (x in left until right) {
+			for (y in top until bottom) {
+				val cell = clipboard[x - position.x, y - position.y] ?: continue
+				placeElementNT(Vector2i(x, y), cell)
 			}
 		}
 
-		if(clipboard.data != null) {
-			for(x in 0 until clipboard.width) {
-				for (y in 0 until clipboard.height) {
-					val pos = Vector2i(x, y).add(position)
-					val element = getElement(pos)
-					if(element is Copyable) {
-						if(clipboard.data[x][y] != null) {
-							element.pasteData(clipboard.data[x][y]!!)
-						}
-					}
-				}
+		for (x in left until right) {
+			for (y in top until bottom) {
+				clipboard.applyData(x - position.x, y - position.y, map[x][y])
 			}
-			manager.swap()
 		}
+		manager.swap()
 	}
 
 	override fun removeElement(position: Vector2i) {
@@ -231,11 +245,12 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 
 	private fun removeElementNT(position: Vector2i) {
 		if(!position.isInBounds(0, 0, width-1, height-1)) return
-		var element: IElement? = map[position.x][position.y] ?: return
+		val element = map[position.x][position.y] ?: return
 		++topology
 		tickables.remove(position)
 		map[position.x][position.y] = null
-		element!!.onRemove(this)
+		buses.remove(element)
+		element.onRemove(this)
 	}
 
 	override fun getElement(position: Vector2i) = if(position.isInBounds(0, 0, width - 1, height - 1)) map[position.x][position.y] else null

@@ -1,19 +1,16 @@
 package me.wieku.circuits.world.elements.gates
 
 import com.badlogic.gdx.math.MathUtils
-import me.wieku.circuits.api.element.edit.Editable
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.save.SaveManager
 import me.wieku.circuits.world.ClassicWorld
 import java.util.HashMap
 
-class PWMGate(pos: Vector2i): SaveableGate(pos), Editable {
+class PWMGate(pos: Vector2i): SaveableGate(pos) {
 
-	@Editable.Spinner("Period", intArrayOf(1, 1, 100000, 1))
-	private var period = 500
+	internal var period = 500
 
-	@Editable.Spinner("Duty cycle", intArrayOf(50, 0, 100, 1))
-	private var duty = 50
+	internal var duty = 50
 
 	private var counter = 0
 

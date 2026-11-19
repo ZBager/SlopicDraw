@@ -3,7 +3,6 @@ package me.wieku.circuits.world.elements.gates
 import com.badlogic.gdx.Input
 import com.google.common.eventbus.Subscribe
 import com.sun.org.apache.xpath.internal.operations.Bool
-import me.wieku.circuits.api.element.edit.Editable
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.world.IWorld
 import me.wieku.circuits.input.event.KeyDownEvent
@@ -11,12 +10,10 @@ import me.wieku.circuits.input.event.KeyUpEvent
 import me.wieku.circuits.save.SaveManager
 import me.wieku.circuits.world.ClassicWorld
 
-class KeyGate(pos: Vector2i): SaveableGate(pos), Editable {
+class KeyGate(pos: Vector2i): SaveableGate(pos) {
 
-	@Editable.Key("Key")
 	var keycode = Input.Keys.L
 
-	@Editable.Boolean("Bistable")
 	var bistable = false
 
 	var locked = false

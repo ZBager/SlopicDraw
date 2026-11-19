@@ -4,7 +4,13 @@ import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.Input
 import com.badlogic.gdx.InputProcessor
 import com.badlogic.gdx.graphics.OrthographicCamera
+import com.badlogic.gdx.graphics.Color
+import com.badlogic.gdx.graphics.glutils.ShapeRenderer
 import com.badlogic.gdx.math.Vector3
+import com.badlogic.gdx.scenes.scene2d.ui.TextField
+import com.badlogic.gdx.scenes.scene2d.ui.Window
+import com.kotcrab.vis.ui.widget.toast.MessageToast
+import me.wieku.circuits.api.math.Direction
 import me.wieku.circuits.api.math.Rectangle
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.input.event.KeyDownEvent
@@ -17,6 +23,10 @@ import me.wieku.circuits.world.ElementRegistry
 import me.wieku.circuits.world.WorldClipboard
 
 class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val editor: Editor):InputProcessor {
+
+	private companion object {
+		val clipboardSlots = arrayOfNulls<WorldClipboard>(10)
+	}
 
 	private enum class STATE {
 		NONE,
@@ -41,6 +51,12 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 	var clipboard:WorldClipboard? = null
 
 	var pasteMode = false
+		private set
+	private var clipboardStack: Pair<Direction, Int>? = null
+	private val shortcutKeys = HashSet<Int>()
+	private val circuitKeys = HashSet<Int>()
+	private val stackPreviewColor = Color(0x7fcbf755)
+
 	var lineMode = false
 
 	private var lastTooltip = ""
@@ -50,7 +66,28 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 	var pause = false
 
 	override fun keyDown(keycode: Int): Boolean {
+		if (keycode in shortcutKeys) return true
 		if(editor.stage.keyDown(keycode)) return true
+
+		if (keycode in Input.Keys.NUM_0..Input.Keys.NUM_9) {
+			if (editor.stage.keyboardFocus is TextField) return true
+			val control = Gdx.input.isKeyPressed(Input.Keys.CONTROL_LEFT) || Gdx.input.isKeyPressed(Input.Keys.CONTROL_RIGHT)
+			if (control) {
+				shortcutKeys.add(keycode)
+				if (editor.stage.actors.any { it is Window && it.isModal && it.isVisible }) return true
+				val shift = Gdx.input.isKeyPressed(Input.Keys.SHIFT_LEFT) || Gdx.input.isKeyPressed(Input.Keys.SHIFT_RIGHT)
+				val slot = keycode - Input.Keys.NUM_0
+				if (shift) storeClipboard(slot) else recallClipboard(slot)
+				return true
+			}
+		}
+
+		if ((brushState == STATE.PASTE || brushState == STATE.MOVE_PASTE) &&
+			(keycode == Input.Keys.Q || keycode == Input.Keys.E)) {
+			clipboard = if (keycode == Input.Keys.Q) clipboard?.rotateLeft() else clipboard?.rotateRight()
+			shortcutKeys.add(keycode)
+			return true
+		}
 
 		if(keycode in Input.Keys.NUM_1..Input.Keys.NUM_9) {
 			editor.palette.select(keycode-Input.Keys.NUM_1)
@@ -92,6 +129,7 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 			lastMY = Gdx.input.y
 			brushState = STATE.MOVE
 		} else {
+			circuitKeys.add(keycode)
 			world.postInput(KeyDownEvent(world, keycode))
 		}
 
@@ -99,7 +137,16 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 	}
 
 	override fun keyUp(keycode: Int): Boolean {
-		if(editor.stage.keyUp(keycode)) return true
+		if (shortcutKeys.remove(keycode)) return true
+		val consumedByStage = editor.stage.keyUp(keycode)
+		val typingDigit = keycode in Input.Keys.NUM_0..Input.Keys.NUM_9 && editor.stage.keyboardFocus is TextField
+		if (consumedByStage || typingDigit) {
+			// A settings dialog may have opened after this key was pressed on the board.
+			if (circuitKeys.remove(keycode)) world.postInput(KeyUpEvent(world, keycode))
+			return true
+		}
+		circuitKeys.remove(keycode)
+		if ((keycode == Input.Keys.A || keycode == Input.Keys.D) && pasteMode) return false
 		if(keycode == Input.Keys.A || keycode == Input.Keys.D) {
 			if(!Gdx.input.isButtonPressed(Input.Buttons.LEFT) && !Gdx.input.isButtonPressed(Input.Buttons.RIGHT)) {
 				if(keycode == Input.Keys.A && Gdx.input.isKeyPressed(Input.Keys.D)) {
@@ -237,9 +284,14 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 					editor.editElement(element)
 			}
 		} else if(brushState == STATE.PASTE) {
-			if(button == Input.Buttons.LEFT) {
-				world.paste(position.copy().sub(clipboard!!.width/2, clipboard!!.height/2), clipboard!!)
+			val clip = clipboard
+			if (button == Input.Buttons.LEFT && clip != null) {
+				val origin = clipboardOrigin(clip)
+				val stack = clipboardStack
+				if (stack == null) world.paste(origin, clip)
+				else world.stackClipboard(origin, clip, stack.first, stack.second)
 			}
+			clipboardStack = null
 			pasteMode = false
 			brushState = STATE.NONE
 		} else if(brushState == STATE.NONE) {
@@ -348,16 +400,68 @@ class MapManipulator(val world:ClassicWorld, val camera: OrthographicCamera, val
 	}
 
 	fun makeCopy() {
-		if(rectangle != null) {
-			clipboard = WorldClipboard.create(rectangle!!, world)
+		val selection = rectangle ?: return
+		if (selection.width > 0 && selection.height > 0) {
+			clipboard = synchronized(world) { WorldClipboard.create(selection, world) }
 		}
 	}
 
 	fun makePaste() {
 		if(clipboard != null) {
+			clipboardStack = null
 			pasteMode = true
 			brushState = STATE.PASTE
 		}
+	}
+
+	fun storeClipboard(slot: Int) {
+		val clip = clipboard
+		if (clip == null) {
+			editor.toastManager.show(MessageToast("Copy a circuit before storing it in slot $slot."), 3f)
+			return
+		}
+		clipboardSlots[slot] = clip
+		editor.toastManager.show(MessageToast("Clipboard stored in slot $slot."), 3f)
+	}
+
+	fun recallClipboard(slot: Int) {
+		val clip = clipboardSlots[slot]
+		if (clip == null) {
+			editor.toastManager.show(MessageToast("Clipboard slot $slot is empty."), 3f)
+			return
+		}
+		clipboard = clip
+		makePaste()
+		editor.toastManager.show(MessageToast("Clipboard slot $slot recalled."), 3f)
+	}
+
+	fun makeStackPaste(direction: Direction, copies: Int) {
+		if (clipboard == null) return
+		makePaste()
+		clipboardStack = direction to copies
+	}
+
+	private fun clipboardOrigin(clip: WorldClipboard) =
+		position.copy().sub(clip.width / 2, clip.height / 2)
+
+	fun drawPastePreview(renderer: ShapeRenderer) {
+		val clip = clipboard ?: return
+		val stack = clipboardStack
+		if (stack != null) {
+			val first = clipboardOrigin(clip)
+			val direction = stack.first
+			val lastX = first.x + direction.x * clip.width * (stack.second - 1)
+			val lastY = first.y + direction.y * clip.height * (stack.second - 1)
+			val left = minOf(first.x, lastX).coerceAtLeast(0)
+			val top = minOf(first.y, lastY).coerceAtLeast(0)
+			val right = (maxOf(first.x, lastX) + clip.width).coerceAtMost(world.width)
+			val bottom = (maxOf(first.y, lastY) + clip.height).coerceAtMost(world.height)
+			if (left < right && top < bottom) {
+				renderer.color = stackPreviewColor
+				renderer.rect(left.toFloat(), top.toFloat(), (right - left).toFloat(), (bottom - top).toFloat())
+			}
+		}
+		clip.drawClipboard(position, renderer)
 	}
 
 	override fun keyTyped(character: Char): Boolean {

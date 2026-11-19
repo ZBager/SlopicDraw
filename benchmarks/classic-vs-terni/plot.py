@@ -1,0 +1,141 @@
+"""Render the Classic/Terni desktop benchmark into two PNGs and a CSV."""
+
+import argparse
+import csv
+import re
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FixedLocator, FuncFormatter
+
+BENCHMARK_ROW = re.compile(
+    r"^(\d+) gates (idle|active) (Classic|Terni): first tick (\d+\.\d+) ms, "
+    r"mean (\d+\.\d+) ms, p95 (\d+\.\d+) ms"
+)
+NATIVE_ROW = re.compile(
+    r"(\d+) bytes uploaded, (\d+) bytes read back per tick, means: "
+    r"([\d.eE+-]+) ms native call, ([\d.eE+-]+) ms submission and wait, "
+    r"([\d.eE+-]+) ms device elapsed, ([\d.eE+-]+) ms compute"
+)
+COLORS = {"Classic": "#315785", "Terni": "#008378"}
+
+
+def parse(log):
+    rows = []
+    for line in log.splitlines():
+        match = BENCHMARK_ROW.match(line)
+        if match:
+            gates, activity, backend, first, mean, p95 = match.groups()
+            rows.append(
+                dict(
+                    gates=int(gates),
+                    activity=activity,
+                    backend=backend,
+                    first_tick_ms=float(first),
+                    mean_tick_ms=float(mean),
+                    p95_tick_ms=float(p95),
+                    calculated_tps=round(1000 / float(mean), 2),
+                    upload_bytes="",
+                    readback_bytes="",
+                    native_call_ms="",
+                    submit_and_wait_ms="",
+                    device_elapsed_ms="",
+                    shader_compute_ms="",
+                )
+            )
+        native = NATIVE_ROW.search(line)
+        if native and rows and rows[-1]["backend"] == "Terni":
+            keys = ("upload_bytes", "readback_bytes", "native_call_ms",
+                    "submit_and_wait_ms", "device_elapsed_ms", "shader_compute_ms")
+            rows[-1].update(zip(keys, native.groups()))
+    sizes = sorted(set(row["gates"] for row in rows))
+    expected = {(size, activity, backend) for size in sizes
+                for activity in ("active", "idle") for backend in COLORS}
+    actual = {(row["gates"], row["activity"], row["backend"]) for row in rows}
+    if not sizes or actual != expected or len(rows) != len(expected):
+        raise ValueError("The log must contain one completed result per size, workload and backend.")
+    return rows, sizes
+
+
+def gate_label(size, _=None):
+    return f"{size / 1_000_000:g}M" if size >= 1_000_000 else f"{size / 1000:g}k"
+
+
+def draw(rows, sizes, directory, metrics, hardware, ticks):
+    field, title, ylabel, filename = metrics
+    plt.rcParams.update({
+        "font.family": "DejaVu Sans",
+        "axes.labelsize": 10,
+        "axes.titleweight": "bold",
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.edgecolor": "#ccd6e0",
+        "text.color": "#192d43",
+        "axes.labelcolor": "#192d43",
+        "xtick.color": "#41566b",
+        "ytick.color": "#41566b",
+    })
+    fig, axes = plt.subplots(1, 2, figsize=(11.6, 5.6), sharey=True)
+    fig.patch.set_facecolor("#f7f9fc")
+    fig.subplots_adjust(left=.09, right=.965, bottom=.22, top=.735, wspace=.15)
+    fig.text(.09, .94, title, fontsize=20, weight="bold", va="top")
+    fig.text(.09, .86, f"{hardware}  •  {ticks} measured ticks per case", fontsize=10)
+    for axis, activity in zip(axes, ("active", "idle")):
+        axis.set_facecolor("white")
+        axis.set_title("Active inputs" if activity == "active" else "Stable inputs", loc="left", pad=11)
+        axis.set_xscale("log")
+        axis.set_yscale("log")
+        axis.xaxis.set_major_locator(FixedLocator(sizes))
+        axis.xaxis.set_major_formatter(FuncFormatter(gate_label))
+        axis.tick_params(axis="both", which="both", length=0)
+        axis.grid(axis="y", which="major", color="#dbe3ec")
+        axis.set_axisbelow(True)
+        axis.set_xlabel("Gate count", labelpad=9)
+        for backend, color in COLORS.items():
+            series = sorted(
+                (row for row in rows if row["activity"] == activity and row["backend"] == backend),
+                key=lambda row: row["gates"],
+            )
+            axis.plot([row["gates"] for row in series], [row[field] for row in series],
+                      label=backend, color=color, marker="o" if backend == "Classic" else "s",
+                      markersize=5, linewidth=2.3)
+    axes[0].set_ylabel(ylabel)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(.966, .874),
+               frameon=False, ncol=2, fontsize=10)
+    fig.text(.09, .095, "Log scales. Classic and Terni ran the same headless circuits.",
+             fontsize=9, color="#41566b")
+    footer = ("Tick time includes evaluation, transfers and host commit."
+              if field == "mean_tick_ms" else
+              "TPS = 1,000 ÷ mean tick latency in ms. No rendering or clock pacing.")
+    fig.text(.09, .061, footer, fontsize=9, color="#41566b")
+    fig.savefig(directory / filename, dpi=180, facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("log", type=Path)
+    parser.add_argument("--output", type=Path, default=Path(__file__).parent)
+    parser.add_argument("--hardware", required=True)
+    parser.add_argument("--ticks", type=int, required=True)
+    args = parser.parse_args()
+    rows, sizes = parse(args.log.read_text())
+    args.output.mkdir(parents=True, exist_ok=True)
+    with (args.output / "measurements.csv").open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+    draw(rows, sizes, args.output,
+         ("mean_tick_ms", "Time to complete one simulation tick", "Mean tick latency (ms)", "tick-latency.png"),
+         args.hardware, args.ticks)
+    draw(rows, sizes, args.output,
+         ("calculated_tps", "Simulation throughput by circuit size", "Calculated ticks per second", "tps.png"),
+         args.hardware, args.ticks)
+
+
+if __name__ == "__main__":
+    main()

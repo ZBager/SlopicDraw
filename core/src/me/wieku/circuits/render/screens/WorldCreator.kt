@@ -11,10 +11,12 @@ import com.badlogic.gdx.utils.Scaling
 import com.badlogic.gdx.utils.viewport.ScreenViewport
 import com.kotcrab.vis.ui.VisUI
 import com.kotcrab.vis.ui.util.adapter.ArrayListAdapter
+import com.kotcrab.vis.ui.util.dialog.Dialogs
 import com.kotcrab.vis.ui.util.form.FormInputValidator
 import com.kotcrab.vis.ui.util.form.SimpleFormValidator
 import com.kotcrab.vis.ui.widget.ListView
 import com.kotcrab.vis.ui.widget.VisTable
+import com.kotcrab.vis.ui.widget.VisTextButton
 import com.kotcrab.vis.ui.widget.spinner.IntSpinnerModel
 import ktx.vis.table
 import ktx.vis.window
@@ -23,6 +25,7 @@ import me.wieku.circuits.render.scene.Drawable
 import me.wieku.circuits.render.scene.getTxRegion
 import me.wieku.circuits.render.scene.onChange
 import me.wieku.circuits.save.SaveManagers
+import me.wieku.circuits.save.SaveReadException
 import me.wieku.circuits.utils.Version
 import me.wieku.circuits.world.ClassicWorld
 import java.io.File
@@ -34,20 +37,26 @@ class WorldCreator:Screen {
 	private var stage: Stage = Stage(ScreenViewport())
 
 	private var mainTable = Table()
+	private val preview = MapPreview()
+	private var selectedMap: LDMap? = null
 
-	data class LDMap(val file: File, val description: Array<String>)
+	data class LDMap(val file: File, val description: Array<String>?)
 
 	init {
 		File("maps/").mkdir()
 		File("blueprints/").mkdir()
 		mainTable.top().left()
 
-		val maps: ArrayList<LDMap>? = File("maps/").listFiles().filter{!it.isDirectory && it.extension == "ldmap"}.mapNotNull {
-			val array = SaveManagers.getHeader(it)
-			if(array != null) {
-				LDMap(it, array)
-			} else null
-		}.toMutableList() as ArrayList<LDMap>
+		val maps = ArrayList<LDMap>()
+		for (file in File("maps/").listFiles().orEmpty()) {
+			if (!file.isFile || file.extension != "ldmap") continue
+			val header = try {
+				SaveManagers.getHeader(file)
+			} catch (error: SaveReadException) {
+				null
+			}
+			maps.add(LDMap(file, header))
+		}
 
 		val adapter = object: ArrayListAdapter<LDMap, VisTable>(maps) {
 			private val bg = VisUI.getSkin().getDrawable("window-bg")
@@ -65,10 +74,12 @@ class WorldCreator:Screen {
 					row()
 					table {
 						left()
-						label(item.description[0]).cell(padBottom = 3f, align = Align.top)
+						label(item.description?.get(0) ?: "Unreadable map").cell(padBottom = 3f, align = Align.top)
 						row()
-						label("Size: ${item.description[1]}x${item.description[2]}").cell(align = Align.left, growX = true)
-						row()
+						if (item.description != null) {
+							label("Size: ${item.description[1]}x${item.description[2]}").cell(align = Align.left, growX = true)
+							row()
+						}
 						label("File: ${item.file.name}").cell(align = Align.left, growX = true)
 						pad(5f)
 					}.cell(growX = true)
@@ -93,9 +104,23 @@ class WorldCreator:Screen {
 
 		view.mainTable.background = getTxRegion(Color(0.08f, 0.08f, 0.08f, 1f))
 
+		val openButton = VisTextButton("Open selected map")
+		openButton.isDisabled = true
+		openButton.onChange {
+			val file = selectedMap?.file ?: return@onChange
+			val world = try {
+				SaveManagers.loadMap(file)
+			} catch (error: SaveReadException) {
+				Dialogs.showOKDialog(stage, "Could not open map", error.message)
+				return@onChange
+			}
+			Main.screen = Editor(world, file)
+		}
+
 		view.setItemClickListener {
-			var file = it.file
-			Main.screen = Editor(SaveManagers.loadMap(file), file)
+			selectedMap = it
+			openButton.isDisabled = false
+			preview.show(it.file)
 		}
 
 		mainTable.add(view.mainTable).growY()
@@ -103,6 +128,12 @@ class WorldCreator:Screen {
 		val rightTable = table {
 			top()
 			image(Drawable(Gdx.files.internal("assets/logo/banner_inv_640.png")), Scaling.fillX).cell( pad = 20f)
+			row()
+			add(preview.image).size(240f, 160f)
+			row()
+			add(preview.status).padBottom(8f)
+			row()
+			add(openButton).padBottom(8f)
 			row()
 			textButton("Create new world").onChange {
 				stage.addActor(window("World creator"){
@@ -161,6 +192,7 @@ class WorldCreator:Screen {
 	}
 
 	override fun show() {
+		selectedMap?.let { preview.show(it.file) }
 		Gdx.input.inputProcessor = stage
 		Gdx.graphics.setTitle("LogicDraw ${Version.version}")
 	}
@@ -178,6 +210,7 @@ class WorldCreator:Screen {
 	}
 
 	override fun dispose() {
+		preview.close()
 		stage.dispose()
 	}
 
@@ -185,5 +218,7 @@ class WorldCreator:Screen {
 
 	override fun resume() {}
 
-	override fun hide() {}
+	override fun hide() {
+		preview.close()
+	}
 }

@@ -100,3 +100,14 @@ task terniNative {
         exec { commandLine "cmake", "--build", out.absolutePath, "--config", "Release" }
     }
 }
+
+task saveCheck(type: JavaExec, dependsOn: testClasses) {
+    main = "me.wieku.circuits.desktop.save.SaveReadHarnessKt"
+    classpath = sourceSets.test.runtimeClasspath
+    args rootProject.file("android/assets/maps/test.ldmap").absolutePath
+}
+
+task clipboardCheck(type: JavaExec, dependsOn: testClasses) {
+    main = "me.wieku.circuits.desktop.edit.ClipboardHarnessKt"
+    classpath = sourceSets.test.runtimeClasspath
+}

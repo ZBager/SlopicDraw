@@ -104,6 +104,10 @@ To run the project, just type: `./gradlew desktop:run` (`gradlew desktop:run` on
 
 For a desktop-only build, use `./gradlew -PdesktopOnly desktop:run`. See the [Terni backend guide](docs/terni.md) for optional Vulkan simulation, tests, and benchmarks.
 
+See [headless simulation, save migration, and buses](docs/circuits.md) for the circuit API, CLI, and wiring rules.
+
+The [Classic vs. Terni benchmark](benchmarks/classic-vs-terni/README.md) compares tick latency and throughput from 1,000 to 1,000,000 gates, with charts, measurements, and reproduction commands.
+
 ## Example circuits
 
 BCD adder:

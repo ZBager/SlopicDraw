@@ -24,12 +24,10 @@ import com.kotcrab.vis.ui.util.form.FormInputValidator
 import com.kotcrab.vis.ui.util.form.SimpleFormValidator
 import com.kotcrab.vis.ui.widget.*
 import com.kotcrab.vis.ui.widget.spinner.IntSpinnerModel
-import com.kotcrab.vis.ui.widget.spinner.Spinner
 import com.kotcrab.vis.ui.widget.toast.MessageToast
 import ktx.vis.*
 import me.wieku.circuits.Main
 import me.wieku.circuits.api.element.IElement
-import me.wieku.circuits.api.element.edit.Editable
 import me.wieku.circuits.api.math.Direction
 import me.wieku.circuits.api.math.Rectangle
 import me.wieku.circuits.api.math.Vector2i
@@ -38,9 +36,10 @@ import me.wieku.circuits.api.world.clock.Updatable
 import me.wieku.circuits.input.MapManipulator
 import me.wieku.circuits.render.scene.*
 import me.wieku.circuits.render.scene.actors.TextTooltip
-import me.wieku.circuits.render.scene.editors.HexEditor
+import me.wieku.circuits.render.scene.editors.ElementEditors
 import me.wieku.circuits.render.utils.About
 import me.wieku.circuits.save.SaveManagers
+import me.wieku.circuits.save.SaveReadException
 import me.wieku.circuits.utils.*
 import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.ElementRegistry
@@ -51,7 +50,6 @@ import org.eclipse.egit.github.core.client.GitHubClient
 import org.eclipse.egit.github.core.service.GistService
 import java.io.File
 import java.io.IOException
-import java.lang.reflect.Field
 import java.util.*
 
 class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
@@ -64,6 +62,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 	private var renderer = ShapeRenderer()
 	private var camera: OrthographicCamera
 	var stage = Stage(ScreenViewport())
+	private val elementEditors = ElementEditors(stage, world)
 	var toastManager: ToastManager
 	private var menuButton: Table
 
@@ -75,6 +74,11 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 	var tooltip: TextTooltip
 
 	private val gray = Color(0x1f1f1faf)
+	private val editorPreferences = Gdx.app.getPreferences("logicdraw-editor")
+	private val canvasPreference = "highContrastCanvas"
+	private var highContrastCanvas = editorPreferences.getBoolean(canvasPreference, false)
+	private val highContrastBackground = Color(0x707070ff)
+	private val highContrastSelection = Color(0xffdf7560.toInt())
 
 	private var lastSave = "Not saved"
 
@@ -269,7 +273,26 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 				MenuManager.addDependent("selection", menuItem("Copy", Drawable(Gdx.files.internal("assets/icons/copy.png"))).onChange { manipulator.makeCopy() })
 				MenuManager.addDependent("clipboard", menuItem("Paste", Drawable(Gdx.files.internal("assets/icons/paste.png"))).onChange { manipulator.makePaste() })
 
-				MenuManager.addDependent("selection", menuItem("Stack") {
+				MenuManager.addDependent("clipboard", menuItem("Store clipboard in slot") {
+					subMenu {
+						for (slot in 0..9) {
+							menuItem("Slot $slot").setShortcut("Ctrl+Shift+$slot").onChange {
+								manipulator.storeClipboard(slot)
+							}
+						}
+					}
+				})
+				menuItem("Recall clipboard slot") {
+					subMenu {
+						for (slot in 0..9) {
+							menuItem("Slot $slot").setShortcut("Ctrl+$slot").onChange {
+								manipulator.recallClipboard(slot)
+							}
+						}
+					}
+				}
+
+				MenuManager.addDependent("selection", menuItem("Stack selection") {
 					subMenu {
 						menuItem("Left").onChange { stackMenu(Direction.WEST) }
 						menuItem("Right").onChange { stackMenu(Direction.EAST) }
@@ -277,11 +300,19 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 						menuItem("Down").onChange { stackMenu(Direction.NORTH) }
 					}
 				})
+				MenuManager.addDependent("clipboard", menuItem("Stack clipboard") {
+					subMenu {
+						menuItem("Left").onChange { stackMenu(Direction.WEST, true) }
+						menuItem("Right").onChange { stackMenu(Direction.EAST, true) }
+						menuItem("Up").onChange { stackMenu(Direction.SOUTH, true) }
+						menuItem("Down").onChange { stackMenu(Direction.NORTH, true) }
+					}
+				})
 
 				MenuManager.addDependent("clipboard", menuItem("Transform") {
 					subMenu {
-						menuItem("Rotate right", Drawable(Gdx.files.internal("assets/icons/rotate-right.png"))).onChange { manipulator.clipboard = manipulator.clipboard!!.rotateRight() }
-						menuItem("Rotate left", Drawable(Gdx.files.internal("assets/icons/rotate-left.png"))).onChange { manipulator.clipboard = manipulator.clipboard!!.rotateLeft() }
+						menuItem("Rotate right (E while pasting)", Drawable(Gdx.files.internal("assets/icons/rotate-right.png"))).onChange { manipulator.clipboard = manipulator.clipboard!!.rotateRight() }
+						menuItem("Rotate left (Q while pasting)", Drawable(Gdx.files.internal("assets/icons/rotate-left.png"))).onChange { manipulator.clipboard = manipulator.clipboard!!.rotateLeft() }
 						menuItem("Flip horizontal", Drawable(Gdx.files.internal("assets/icons/arrows-h.png"))).onChange { manipulator.clipboard = manipulator.clipboard!!.flipHorizontal() }
 						menuItem("Flip vertical", Drawable(Gdx.files.internal("assets/icons/arrows-v.png"))).onChange { manipulator.clipboard = manipulator.clipboard!!.flipVertical() }
 					}
@@ -357,6 +388,15 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 					}
 				})
 
+			}
+
+			menu("View") {
+				val canvasToggle = menuItem(canvasToggleLabel())
+				canvasToggle.onChange {
+					highContrastCanvas = !highContrastCanvas
+					editorPreferences.putBoolean(canvasPreference, highContrastCanvas).flush()
+					canvasToggle.setText(canvasToggleLabel())
+				}
 			}
 
 			menu("Help") {
@@ -445,20 +485,31 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 		stage.addActor(toastTable)
 	}
 
-	private fun stackMenu(direction: Direction) {
-		this@Editor.stage.addActor(window("Stack"){
+	private fun stackMenu(direction: Direction, clipboard: Boolean = false) {
+		val selection = manipulator.rectangle?.let { Rectangle(it.x, it.y, it.x + it.width, it.y + it.height) }
+		if (!clipboard && (selection == null || selection.width == 0 || selection.height == 0)) return
+		val side = when (direction) {
+			Direction.WEST -> "left"
+			Direction.EAST -> "right"
+			Direction.SOUTH -> "up"
+			Direction.NORTH -> "down"
+			else -> return
+		}
+		val source = if (clipboard) "clipboard" else "selection"
+		this@Editor.stage.addActor(window("Stack $source $side"){
 			addCloseButton()
 			val sizeModel = IntSpinnerModel(1, 1, Math.max(world.width, world.height), 1)
 
-			label("Stack amount: ")
+			label(if (clipboard) "Copies to place:" else "Additional copies:")
 
 			spinner("", sizeModel).cell(growX = true, padBottom = 2f)
 
 			row()
 
-			val okButton = textButton("OK").cell(growX = true, colspan = 2)
+			val okButton = textButton(if (clipboard) "Choose position" else "OK").cell(growX = true, colspan = 2)
 			okButton.onChange {
-				world.stack(manipulator.rectangle!!, direction, sizeModel.value)
+				if (clipboard) manipulator.makeStackPaste(direction, sizeModel.value)
+				else if (selection != null) world.stack(selection, direction, sizeModel.value)
 				fadeOut()
 			}
 
@@ -585,6 +636,8 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 			val world = SaveManagers.loadBlueprint(file)
 			manipulator.clipboard = WorldClipboard.create(Rectangle(0, 0, world.width, world.height), world)
 			toastManager.show(MessageToast("Blueprint loaded!"), 5f)
+		} catch (e: SaveReadException) {
+			Dialogs.showOKDialog(stage, "Could not open blueprint", e.message)
 		} catch (e: Exception) {
 			toastManager.show(MessageToast("Error loading blueprint!"), 5f)
 		}
@@ -647,6 +700,9 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 	}
 
 
+	private fun canvasToggleLabel() =
+		if (highContrastCanvas) "Use black canvas" else "Use high-contrast canvas"
+
 	private var color = Color()
 	private val bound = Color(0.2f, 0.2f, 0.2f, 0.6f)
 	private val paletteColor = Color(0x212121ef)
@@ -690,7 +746,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 		Gdx.gl.glViewport(0, 0, Gdx.graphics.width, (Gdx.graphics.height - menuBar.table.height).toInt())
 
 		renderer.begin(ShapeRenderer.ShapeType.Filled)
-		renderer.color = Color.BLACK
+		renderer.color = if (highContrastCanvas) highContrastBackground else Color.BLACK
 		renderer.rect(0f, 0f, world.width.toFloat(), world.height.toFloat())
 		for (x in corner0.x..corner1.x) {
 			for (y in corner0.y..corner1.y) {
@@ -711,12 +767,12 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 		if (manipulator.pasteMode || manipulator.rectangle != null) {
 			if (manipulator.rectangle != null) {
-				renderer.color = bound
+				renderer.color = if (highContrastCanvas) highContrastSelection else bound
 				renderer.rect(manipulator.rectangle!!.x.toFloat(), manipulator.rectangle!!.y.toFloat(), manipulator.rectangle!!.width.toFloat(), manipulator.rectangle!!.height.toFloat())
 			}
 
 			if (manipulator.pasteMode) {
-				manipulator.clipboard!!.drawClipboard(manipulator.position, renderer)
+				manipulator.drawPastePreview(renderer)
 			}
 		} else {
 			if(palette.currentBrush != null) {
@@ -783,126 +839,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 	}
 
 
-	//TODO: Move this to other class
-	var editorWindow: VisWindow? = null
-	fun editElement(element: IElement) {
-		if(element is Editable) {
-			var fields = ElementRegistry.editors[element!!.javaClass]
-			if (editorWindow == null || !stage.actors.contains(editorWindow)) {
-				editorWindow = window("${ElementRegistry.names[element!!.javaClass]} settings") {
-					addCloseButton()
-
-					val spinners = HashMap<Spinner, Field>()
-					val radioButtons = HashMap<VisRadioButton, Field>()
-
-					val keyStore = HashMap<VisTextButton, Int>()
-					val keySelectors = HashMap<VisTextButton, Field>()
-
-					val hexEditors = HashMap<HexEditor, Field>()
-
-					for(field in fields!!) {
-						if(field.annotation is Editable.Spinner) {
-							val amodel = field.annotation.model
-
-							val jField = field.field
-							jField.isAccessible = true
-
-							val model = IntSpinnerModel(jField.getInt(element), amodel[1], amodel[2], amodel[3])
-							val spinner = spinner(field.annotation.name, model).cell(growX = true, pad = 2f)
-							spinners.put(spinner, jField)
-							row()
-						}
-
-						if(field.annotation is Editable.Hex) {
-							val hexEditor = HexEditor()
-							val jField = field.field
-							jField.isAccessible = true
-							hexEditor.loadFromBytes(jField.get(element) as ByteArray)
-							hexEditors.put(hexEditor, jField)
-							add(hexEditor)
-							row()
-						}
-
-						if(field.annotation is Editable.Boolean) {
-							val jField = field.field
-							jField.isAccessible = true
-
-							radioButtons.put(radioButton(field.annotation.name) {isChecked = jField.getBoolean(element)}, jField)
-
-							row()
-						}
-
-						if(field.annotation is Editable.Key) {
-							val jField = field.field
-							jField.isAccessible = true
-
-							table {
-								label(field.annotation.name+": ")
-								val button = textButton(Input.Keys.toString(jField.getInt(element))).cell(width = 100f)
-
-								keyStore.put(button, jField.getInt(element))
-								keySelectors.put(button, jField)
-
-								button.onChange {
-									if(!button.isDisabled){
-										button.isDisabled = true
-									}
-								}
-
-								this@Editor.stage.addListener(object: InputListener() {
-									override fun keyDown(event: InputEvent?, keycode: Int): Boolean {
-										if(button.isDisabled) {
-											if(keycode != Input.Keys.ESCAPE) {
-												keyStore.put(button, keycode)
-												button.setText(Input.Keys.toString(keycode))
-											}
-											button.isDisabled = false
-											return true
-										}
-										return super.keyDown(event, keycode)
-									}
-								})
-
-							}
-
-							row()
-						}
-
-					}
-
-					val okButton = textButton("OK").cell(growX = true)
-					okButton.onClickS {
-						synchronized(world) {
-							spinners.forEach { t, u -> u.setInt(element, (t.model as IntSpinnerModel).value) }
-							radioButtons.forEach { t, u -> u.setBoolean(element, t.isChecked) }
-							keySelectors.forEach { t, u -> u.setInt(element, keyStore[t]!!) }
-							hexEditors.forEach { t, u -> u.set(element, t.saveToBytes()) }
-						}
-						fadeOut()
-					}
-
-					val listener = object : ChangeListener() {
-						override fun changed(event: ChangeEvent?, actor: Actor?) {
-							var check = true
-							for(spinner in spinners)
-								check = check && spinner.key.textField.isInputValid
-							okButton.isDisabled = !check
-						}
-					}
-
-					spinners.forEach {
-						it.key.textField.addListener(listener)
-						it.key.addListener(listener)
-					}
-
-					pack()
-
-					centerWindow()
-				}
-				stage.addActor(editorWindow!!.fadeIn())
-			}
-		}
-	}
+	fun editElement(element: IElement) = elementEditors.open(element)
 
 	private var time = System.nanoTime()
 	private var tick = 0L

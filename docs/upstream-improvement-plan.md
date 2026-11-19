@@ -1,0 +1,28 @@
+# SlopicDraw improvement plan
+
+This review covers all 16 issues returned by the [original LogicDraw issue tracker](https://github.com/Wieku/LogicDraw/issues?q=is%3Aissue), including five closed issues and their comments. The assessment comes from reading the current fork and its existing tests. The roadmap items have been implemented in the fork. The proposed work and acceptance criteria are retained below. See the [circuit guide](circuits.md) for the headless API, save migration, and bus semantics.
+
+## 1. Next patch — protect saved circuits and improve editing
+
+| Work | Current behavior | Acceptance |
+| --- | --- | --- |
+| Reject unsupported or damaged maps safely. [#1](https://github.com/Wieku/LogicDraw/issues/1) | Both legacy loaders call `ClassicWorld.forcePlace`, which throws on unknown types. The world chooser calls the loader directly. Legacy element properties are positional, so skipping an unknown element can desynchronize the reader. | Show the filename and unknown type or decoding error. Keep the chooser usable and leave the original file intact. A bad header must not stop the chooser from listing healthy maps. Test unknown element IDs, truncated maps and blueprints, unsupported versions, and valid v1/v2 fixtures. |
+| Finish clipboard rotation and stacking workflows. [#6](https://github.com/Wieku/LogicDraw/issues/6), [#8](https://github.com/Wieku/LogicDraw/issues/8), [#13](https://github.com/Wieku/LogicDraw/issues/13) | The Edit menu already rotates the active clipboard and stacks a selection. Preserve both operations and confirm the requested shortcut and stacking behavior. Upstream closed the rotation regression. | Wire Q/E to the existing 90-degree transforms when the clipboard tool is active. Reuse the selection stacking path for the active clipboard, with visible direction and count. Test rectangular clips, copied gate data, crossed wires, edge clipping and running versus paused simulation. |
+| Improve visibility for dark wires. [#15](https://github.com/Wieku/LogicDraw/issues/15) | The editor clear color is hard-coded. | Add a persisted high-contrast editor background setting. Check dark wires, crossed wires, dark display pixels, selection and paste indicators in each setting. |
+
+## 2. Editor release — reuse the clipboard and find projects
+
+- Add numbered clipboard slots with Ctrl+Shift+digit to store and Ctrl+digit to recall. Retain plain number keys for the existing brush palette. Define shortcut precedence so editing text, typing into a gate dialog and using keyboard-driven circuits do not accidentally manipulate clipboards. Start with session-local snapshots. Verify recalled copies stay independent after rotate, paste and stack. [#7](https://github.com/Wieku/LogicDraw/issues/7)
+- Add a lazy map preview to the project chooser. Generate or cache thumbnails separately from legacy save files so this feature can ship before a format migration. Bound the work, invalidate by file change and show a placeholder for unsupported maps. Verify browsing a directory of large maps stays responsive. [#9](https://github.com/Wieku/LogicDraw/issues/9)
+- Replace the reflection-driven settings dialog incrementally with per-element editor factories. Start with Delay or PWM, then cover keyboard, programmer and RAM settings. Apply changes through the world's existing tick synchronization and retain the original defaults, ranges and persisted settings. Extract focused editor responsibilities alongside these changes. [#10](https://github.com/Wieku/LogicDraw/issues/10), [#18](https://github.com/Wieku/LogicDraw/issues/18)
+
+## 3. Simulation and format changes — settle compatibility first
+
+- Define the engine boundary around headless circuit evaluation, tick scheduling, topology edits and state access. The fork already has a Classic/Terni backend interface, but it still takes LogicDraw's internal tickable collection and state manager. Improve it against an actual headless caller before committing to a public API. Require existing Classic/Terni parity, save and live-edit regressions to pass. [#11](https://github.com/Wieku/LogicDraw/issues/11), [#18](https://github.com/Wieku/LogicDraw/issues/18)
+- Prototype a length-delimited save format with bounded metadata and element records. Preserve v1/v2 readers and add explicit export or migration, with fixtures to show no loss of readable legacy maps or blueprint data. Define what unknown records mean before offering an opt-in partial load. Make thumbnails and sharing metadata optional. Decide on the extension after round-trip and downgrade behavior are established. [#17](https://github.com/Wieku/LogicDraw/issues/17), [#1](https://github.com/Wieku/LogicDraw/issues/1)
+- Specify buses after agreeing on bit order, taps, crossed buses, width mismatches and multiply driven bits. Prototype buses as grouped existing nets on the CPU, verify ordinary tick timing and clipboard behavior, then check that Terni receives equivalent per-bit connectivity. Make persistence part of the compatibility review. [#12](https://github.com/Wieku/LogicDraw/issues/12)
+
+## Closed upstream issues
+
+- Keep smoke checks for pointer and keyboard dispatch, mouse Back/Forward palette cycling, first click after refocus, and gate-setting dialogs. Upstream marked the input rewrite, mouse button and settings issues fixed, and closed the focus issue. Existing settings support is the starting point for editor factories. [#2](https://github.com/Wieku/LogicDraw/issues/2), [#4](https://github.com/Wieku/LogicDraw/issues/4), [#5](https://github.com/Wieku/LogicDraw/issues/5), [#14](https://github.com/Wieku/LogicDraw/issues/14)
+- Mobile input stays outside this desktop roadmap. Upstream explicitly dropped that work. [#3](https://github.com/Wieku/LogicDraw/issues/3)

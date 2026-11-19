@@ -67,7 +67,7 @@ jobs:
         run: |
           cmake -S desktop/native -B build/terni -DCMAKE_BUILD_TYPE=Release
           cmake --build build/terni --parallel
-          ./gradlew --no-daemon -PdesktopOnly :desktop:dist :desktop:terniCheck \
+          ./gradlew --no-daemon -PdesktopOnly :desktop:dist :desktop:saveCheck :desktop:clipboardCheck :desktop:terniCheck \
             -Dlogicdraw.terni.software=true "-Dlogicdraw.terni.library=$PWD/${{ matrix.library }}"
 
       - name: Build JNI bridge and distribution, then compare Classic and Terni
@@ -80,7 +80,7 @@ jobs:
           cmake --build build/terni --config Release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $library = (Resolve-Path '${{ matrix.library }}').Path
-          .\gradlew.bat --no-daemon -PdesktopOnly :desktop:dist :desktop:terniCheck '-Dlogicdraw.terni.software=true' "-Dlogicdraw.terni.library=$library"
+          .\gradlew.bat --no-daemon -PdesktopOnly :desktop:dist :desktop:saveCheck :desktop:clipboardCheck :desktop:terniCheck '-Dlogicdraw.terni.software=true' "-Dlogicdraw.terni.library=$library"
           exit $LASTEXITCODE
 
       - name: Assemble release archive

@@ -15,6 +15,15 @@ fun main(args: Array<String>) {
 			SimulationBackends.create = { TerniSimulation(java.lang.Boolean.getBoolean("logicdraw.terni.software")) }
 		} else System.err.println("Classic (Terni is unavailable on " + os + ")")
 	}
+	if (args.firstOrNull() == "--headless") {
+		try {
+			runHeadless(args.copyOfRange(1, args.size))
+		} catch (error: Exception) {
+			System.err.println(error.message)
+			kotlin.system.exitProcess(1)
+		}
+		return
+	}
 	val config = LwjglApplicationConfiguration()
 	config.width = 1024
 	config.height = 768

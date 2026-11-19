@@ -4,7 +4,6 @@ import me.wieku.circuits.api.element.BasicInput
 import me.wieku.circuits.api.element.BasicOutput
 import me.wieku.circuits.api.element.BasicWire
 import me.wieku.circuits.api.element.holders.Inputs
-import me.wieku.circuits.api.element.edit.Editable
 import me.wieku.circuits.api.math.Axis
 import me.wieku.circuits.api.math.Vector2i
 import me.wieku.circuits.api.world.IWorld
@@ -12,12 +11,11 @@ import me.wieku.circuits.save.SaveManager
 import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.elements.io.Controller
 
-class ProgramInputGate(pos: Vector2i) : SaveableGate(pos), Editable {
+class ProgramInputGate(pos: Vector2i) : SaveableGate(pos) {
 
 	private var carryOut: BasicOutput? = null
 
-	@Editable.Hex("Program")
-	private var bytes: ByteArray = ByteArray(1)
+	internal var bytes: ByteArray = ByteArray(1)
 		set(value) {
 			field = value
 			index = -1
@@ -98,10 +96,7 @@ class ProgramInputGate(pos: Vector2i) : SaveableGate(pos), Editable {
 		toUpdate = manager.getBoolean()
 		toUpdate2 = manager.getBoolean()
 		index = manager.getInteger()
-		bytes = ByteArray(manager.getInteger())
-		for (i in 0 until bytes.size) {
-			bytes[i] = manager.getByte()
-		}
+		bytes = manager.getBytes(manager.getInteger())
 	}
 
 	override fun save(manager: SaveManager) {
