@@ -429,6 +429,8 @@ fun main(args: Array<String>) {
 		renderBenchmark(args[1].toInt(), args[2] == "terni", args[3].toInt())
 	} else if (args.isNotEmpty() && args[0] == "batch") {
 		benchmarkBatches(software, args[1].toInt())
+	} else if (args.isNotEmpty() && args[0] == "resident") {
+		benchmarkResident(args[1].split(',').map { it.toInt() }, software, args[2].toInt())
 	} else if (args.isNotEmpty() && args[0] == "benchmark") {
 		val ticks = args[2].toInt()
 		require(ticks > 0)

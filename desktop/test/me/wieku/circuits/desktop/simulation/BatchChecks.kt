@@ -131,8 +131,7 @@ internal fun verifyPreviewCadence(software: Boolean) {
 private data class BatchBenchmarkCase(val name: String, val size: Int, val previewHz: Int? = null)
 
 internal fun benchmarkBatches(software: Boolean, samples: Int) {
-	require(samples > 0)
-	val cases = listOf(
+	runBatchBenchmark(200, software, samples, listOf(
 		BatchBenchmarkCase("Classic", 1),
 		BatchBenchmarkCase("Terni", 1),
 		BatchBenchmarkCase("Terni", 16),
@@ -140,10 +139,33 @@ internal fun benchmarkBatches(software: Boolean, samples: Int) {
 		BatchBenchmarkCase("Terni", 256),
 		BatchBenchmarkCase("Terni resident 20 Hz", 256, 20),
 		BatchBenchmarkCase("Terni resident 60 Hz", 256, 60)
+	))
+}
+
+internal fun benchmarkResident(sizes: List<Int>, software: Boolean, samples: Int) {
+	require(sizes.isNotEmpty() && sizes.distinct().size == sizes.size)
+	val cases = listOf(
+		BatchBenchmarkCase("Classic", 1),
+		BatchBenchmarkCase("Terni", 256),
+		BatchBenchmarkCase("Terni resident 60 Hz", 256, 60)
 	)
+	for (gates in sizes) {
+		require(gates in 2..256 && gates % 2 == 0)
+		runBatchBenchmark(gates, software, samples, cases, warmUpForSweep = true)
+	}
+}
+
+private fun runBatchBenchmark(gates: Int, software: Boolean, samples: Int, cases: List<BatchBenchmarkCase>,
+	warmUpForSweep: Boolean = false) {
+	require(samples > 0)
 	for (case in cases) {
 		val size = case.size
-		val world = feedbackBoard(200, if (case.name == "Classic") ClassicSimulation else TerniSimulation(software))
+		val warmup = when {
+			!warmUpForSweep -> 30
+			size == 1 -> 50_000 // Let the JVM optimize the small Classic loop before timing.
+			else -> 300
+		}
+		val world = feedbackBoard(gates, if (case.name == "Classic") ClassicSimulation else TerniSimulation(software))
 		try {
 			case.previewHz?.let { world.previewHz = it }
 			fun run(batch: Int) {
@@ -153,7 +175,7 @@ internal fun benchmarkBatches(software: Boolean, samples: Int) {
 				} else if (size == 1) world.update(tick)
 				else world.updateBatch(tick, size)
 			}
-			repeat(30) { run(it) }
+			repeat(warmup) { run(it) }
 			if (size > 1) check(world.simulationStatus.contains("(batched)")) { world.simulationStatus }
 			else if (case.name == "Terni") check(world.simulationStatus.startsWith("Terni ")) { world.simulationStatus }
 			val times = LongArray(samples)
@@ -161,18 +183,19 @@ internal fun benchmarkBatches(software: Boolean, samples: Int) {
 			val wallStart = System.nanoTime()
 			for (sample in times.indices) {
 				val start = System.nanoTime()
-				run(30 + sample)
+				run(warmup + sample)
 				times[sample] = System.nanoTime() - start
 			}
 			world.synchronizeSimulation()
 			val duration = System.nanoTime() - wallStart
-			check(world[1, 2]!!.getState(Axis.HORIZONTAL)!!.isActive() == ((30L + samples) * size % 2L == 1L))
+			if (size > 1) check(world.simulationStatus.contains("(batched)")) { world.simulationStatus }
+			check(world[1, 2]!!.getState(Axis.HORIZONTAL)!!.isActive() == ((warmup.toLong() + samples) * size % 2L == 1L))
 			times.sort()
 			val mean = duration.toDouble() / samples
 			val p95 = times[(times.size - 1) * 95 / 100]
 			println(String.format(Locale.ROOT,
-				"200 gates, %s, batch %d: %.3f us/tick, %.0f completed TPS, %.3f us p95 batch latency, %d scheduled previews",
-				case.name, size, mean / size / 1000.0, size * 1_000_000_000.0 / mean, p95 / 1000.0,
+				"%d gates, %s, batch %d: %.3f us/tick, %.0f completed TPS, %.3f us p95 batch latency, %d scheduled previews",
+				gates, case.name, size, mean / size / 1000.0, size * 1_000_000_000.0 / mean, p95 / 1000.0,
 				world.previewReadbacks - previousPreviews))
 		} finally {
 			world.closeSimulation()

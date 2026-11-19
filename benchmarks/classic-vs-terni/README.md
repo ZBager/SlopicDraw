@@ -4,6 +4,7 @@ Measured on Linux x86-64 with an AMD Ryzen 7 7800X3D and NVIDIA GeForce RTX 4070
 
 - [Tick latency by gate count](tick-latency.png) · [Throughput by gate count](tps.png) · [Measurements CSV](measurements.csv)
 - [200-gate batching and preview graph](small-circuit-batching.png) · [Small-circuit CSV](small-circuit-measurements.csv)
+- [60 Hz resident preview TPS](resident-60hz-tps.png) · [60 Hz resident preview tick latency](resident-60hz-tick-latency.png) · [Resident preview CSV](resident-60hz-measurements.csv)
 
 ## Gate-count sweep
 
@@ -29,6 +30,13 @@ The small benchmark has 100 independent feedback nets that toggle every tick, ea
 
 Both workloads run headlessly without clock pacing or rendering. The small-circuit result measures completed simulation throughput. The interactive editor caps the requested rate at 1,000,000 TPS.
 
+## 60 Hz resident preview sweep
+
+This sweep uses the same feedback pairs at 16, 32, 64, 128, 200, and 256 gates. It compares Classic single steps with two Terni paths using 256-tick bursts. One reads back after every burst, and the resident path publishes at most 60 previews per second. Classic had 50,000 warmup calls per size to let the JVM optimize the small loop. Terni had 300 warmup bursts per size. Each case then ran 5,000 measured calls.
+
+The timer includes the final exact synchronization. Mean tick time spreads the cost of each burst over its completed ticks. The CSV also records p95 call latency and the count of scheduled previews. Classic remains faster at 16 gates on this fixture. At 200 gates, the resident path reached **2.36 million TPS at 0.424 µs per tick** and issued **33 scheduled readbacks across 5,000 bursts**, plus the final synchronization. Reading back each burst reached **2.25 million TPS at 0.444 µs per tick**. These are uncapped headless measurements.
+
+
 ## Reproduce
 
 Build the desktop JNI library as described in the [Terni guide](../../docs/terni.md).
@@ -46,5 +54,16 @@ python3 benchmarks/classic-vs-terni/plot.py benchmark.log --batch-log batching.l
   --hardware 'Ryzen 7 7800X3D + GeForce RTX 4070 Ti' --ticks 200 --batch-samples 5000
 ```
 
-The plotting script requires Matplotlib. Adjust the hardware label for the
+To reproduce the 60 Hz sweep and its two graphs:
+
+```sh
+./gradlew -PdesktopOnly :desktop:terniResidentBenchmark \
+  -Psizes=16,32,64,128,200,256 -Psamples=5000 \
+  -Dlogicdraw.terni.library="$PWD/build/terni/liblogicdraw_terni.so" > resident.log 2>&1
+
+python3 benchmarks/classic-vs-terni/plot_resident.py resident.log \
+  --hardware 'Ryzen 7 7800X3D + GeForce RTX 4070 Ti'
+```
+
+The plotting scripts require Matplotlib. Adjust the hardware label for the
 machine used in the run.
