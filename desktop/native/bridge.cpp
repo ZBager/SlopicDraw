@@ -324,7 +324,7 @@ JNIEXPORT jdouble JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_
             if (!resume) sim.runner->queue_write(3, sim.signals.data(), sim.signals.size() * sizeof(jint));
             double gpu_ms = 0;
             for (int offset = 0; offset < ticks;) {
-                const int count = std::min(max_resident_ticks, ticks - offset);
+                const int count = std::min(max_resident_ticks, static_cast<int>(ticks) - offset);
                 std::vector<bool> run(1 + 2 * max_resident_ticks, false);
                 run[0] = offset == 0 && !resume;
                 std::fill(run.begin() + 1, run.begin() + 1 + 2 * count, true);
