@@ -28,6 +28,9 @@ class AsyncClock (private val updatable: Updatable<*>, tickRate: Int)  {
 		if(isRunning()) return
 
 		val scheduledGeneration = ++generation
+		val batch = updatable as? Updatable.ByTickBatch
+		val count = batch?.ticksPerCall(tickRate) ?: 1
+		val period = 1_000_000_000L * count / tickRate
 		var lastCheck = System.nanoTime()
 		var timeCheck = 0L
 		var tempTPS = 0L
@@ -36,23 +39,23 @@ class AsyncClock (private val updatable: Updatable<*>, tickRate: Int)  {
 			var updateTime = System.nanoTime() - lastCheck
 			lastCheck = System.nanoTime()
 
-			timeCheck+=updateTime
-
-			++tempTPS
-
-			if(timeCheck>=1000000000) {
-				currentTPS = (tempTPS * (1_000_000_000.0 / timeCheck)).toFloat()
-				tempTPS = 0
-				timeCheck = 0
-			}
-
 			synchronized(tickLock) {
 				if (generation != scheduledGeneration) return@scheduleAtFixedRate
-				(updatable as Updatable<Number>).update(if (delta) updateTime / 1000000000f else currentTick)
-				++currentTick
+				val advanced = if (batch == null) {
+					(updatable as Updatable<Number>).update(if (delta) updateTime / 1000000000f else currentTick)
+					1
+				} else batch.advance(currentTick, count) { generation == scheduledGeneration }
+				currentTick += advanced
+				timeCheck += updateTime
+				tempTPS += advanced
+				if (timeCheck >= 1_000_000_000L) {
+					currentTPS = (tempTPS * (1_000_000_000.0 / timeCheck)).toFloat()
+					tempTPS = 0
+					timeCheck = 0
+				}
 			}
 
-		}, 0, sleepTime, TimeUnit.NANOSECONDS)
+		}, 0, period, TimeUnit.NANOSECONDS)
 	}
 
 	@Synchronized

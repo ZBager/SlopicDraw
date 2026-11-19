@@ -44,6 +44,7 @@ import me.wieku.circuits.utils.*
 import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.ElementRegistry
 import me.wieku.circuits.world.WorldClipboard
+import me.wieku.circuits.world.simulation.MAX_BATCH_TICKS
 import org.eclipse.egit.github.core.Gist
 import org.eclipse.egit.github.core.GistFile
 import org.eclipse.egit.github.core.client.GitHubClient
@@ -52,10 +53,9 @@ import java.io.File
 import java.io.IOException
 import java.util.*
 
-class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
+class Editor(val world: ClassicWorld) : Screen, Updatable.ByTickBatch {
 
 	private lateinit var mainClock: AsyncClock
-	@Volatile private var tickrate = 0L
 
 	private var manipulator: MapManipulator
 
@@ -429,6 +429,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 				stopButton.onClickS {
 					mainClock.stop()
+					world.synchronizeSimulation()
 				}
 
 				stepButton.onClickS {
@@ -443,6 +444,14 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 							val model = IntSpinnerModel(mainClock.tickRate, 1, 1000000, 10)
 							val spinner = spinner("Tickrate:", model).cell(growX = true, pad = 2f)
 							row()
+							val refresh = VisSelectBox<String>()
+							refresh.setItems("20 Hz", "60 Hz")
+							refresh.selectedIndex = if (world.previewHz == 20) 0 else 1
+							table {
+								label("Terni preview refresh").cell(padRight = 8f)
+								add(refresh).growX()
+							}.cell(growX = true, pad = 2f)
+							row()
 
 							val okButton = textButton("OK").cell(growX = true)
 							okButton.onClickS {
@@ -451,6 +460,8 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 								if(isRunning) mainClock.stop()
 
 								mainClock.tickRate = model.value
+								world.previewHz = if (refresh.selectedIndex == 0) 20 else 60
+								editorPreferences.putInteger("previewRefreshHz", world.previewHz).flush()
 
 								if(isRunning) mainClock.start()
 								fadeOut()
@@ -468,7 +479,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 							pack()
 
 							val vector = configButton.localToStageCoordinates(Vector2(0f, 0f))
-							setPosition(vector.x, vector.y - height)
+							setPosition(minOf(vector.x, maxOf(0f, this@Editor.stage.width - width)), vector.y - height)
 						}
 						stage.addActor(window!!.fadeIn())
 					}
@@ -694,6 +705,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 	override fun show() {
 		world.openSimulation()
+		world.previewHz = if (editorPreferences.getInteger("previewRefreshHz", 60) == 20) 20 else 60
 		mainClock = AsyncClock(this, 1000)
 		world.clock = mainClock
 		mainClock.start()
@@ -717,6 +729,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 		Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT)
 
 		if(!mainClock.isRunning()) {
+			world.synchronizeSimulation()
 			world.updateTasks()
 		}
 
@@ -726,7 +739,7 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 		delta1 += delta
 		if (delta1 >= 1f) {
-			Gdx.graphics.setTitle("LogicDraw ${Version.version} (world: ${world.name}) (tickrate: ${if (mainClock.isRunning()) tickrate else 0}) (fps: ${Gdx.graphics.framesPerSecond}) (${world.getStateManager().usedNodes} nodes) (${world.entities} entities) [${world.simulationStatus}] | $lastSave")
+			Gdx.graphics.setTitle("LogicDraw ${Version.version} (world: ${world.name}) (tickrate: ${if (mainClock.isRunning()) mainClock.getTPS().toLong() else 0}) (fps: ${Gdx.graphics.framesPerSecond}) (${world.getStateManager().usedNodes} nodes) (${world.entities} entities) [${world.simulationStatus}] | $lastSave")
 			delta1 = 0f
 		}
 
@@ -841,16 +854,17 @@ class Editor(val world: ClassicWorld) : Screen, Updatable.ByTick {
 
 	fun editElement(element: IElement) = elementEditors.open(element)
 
-	private var time = System.nanoTime()
-	private var tick = 0L
-	override fun update(value: Long) {
-		world.update(value)
-		if (System.nanoTime() - time >= 1000000000) {
-			tickrate = value - tick
-			tick = value
-			time = System.nanoTime()
-		}
+	override fun ticksPerCall(tickRate: Int): Int =
+		if (world.supportsPreviewBatches) (tickRate / 1000).coerceIn(1, MAX_BATCH_TICKS) else 1
+
+	override fun advance(tick: Long, count: Int, running: () -> Boolean): Int {
+		if (world.supportsPreviewBatches) return world.updatePreviewBatch(tick, count, running = running)
+		if (!running()) return 0
+		world.update(tick)
+		return 1
 	}
+
+	override fun update(value: Long) = world.update(value)
 
 	override fun hide() {
 		mainClock.stop()

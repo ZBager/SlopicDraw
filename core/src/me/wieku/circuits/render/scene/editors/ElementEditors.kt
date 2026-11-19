@@ -83,6 +83,7 @@ internal class ElementEditors(private val stage: Stage, private val world: Class
 			ok.onClickS {
 				if (form.isValid()) {
 					synchronized(world) {
+						world.synchronizeSimulation()
 						if (world.getElement(element.getPosition()) === element) apply()
 					}
 					fadeOut()

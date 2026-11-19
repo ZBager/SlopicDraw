@@ -82,6 +82,7 @@ object SaveManagers {
 	private fun write(world: ClassicWorld, file: File, magic: String, version: Int) {
 		synchronized(world) {
 			world.updateTasks()
+			world.synchronizeSimulation()
 			if (version < 3 && world.hasBusElements) throw IOException("Buses require save version 3.")
 			val destination = file.absoluteFile
 			val temporary = File.createTempFile("ld-save-", ".tmp", destination.parentFile)

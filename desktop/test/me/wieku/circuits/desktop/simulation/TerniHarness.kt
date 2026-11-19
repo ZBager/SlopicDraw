@@ -170,7 +170,7 @@ private fun verify() {
 	}
 }
 
-private fun verifyReduction() {
+private fun verifyReduction(batched: Boolean = false) {
 	val cpu = ClassicWorld(50, 20, "reduction", ClassicSimulation)
 	val gpu = ClassicWorld(50, 20, "reduction", TerniSimulation(software, checkOrder = true))
 	try {
@@ -208,12 +208,14 @@ private fun verifyReduction() {
 				if (tick == 8) world[5, 16]!!.getState(Axis.HORIZONTAL)!!.setActive(true)
 				if (tick == 21) world.removeElement(Vector2i(8, 16))
 				if (tick == 24) world.place(8, 16, "wire")
-				world.update(tick.toLong())
+				if (batched) world.updateBatch(tick.toLong(), 1) else world.update(tick.toLong())
 			}
-			check(gpu.simulationStatus.contains("(net reduction)")) { gpu.simulationStatus }
+			val mode = if (batched) "batched" else "net reduction"
+			check(gpu.simulationStatus.contains("($mode)")) { gpu.simulationStatus }
 			checkState(cpu, gpu, tick.toLong())
 		}
-		println("Net reduction parity passed for complete truth tables, idle nets, and shared drivers.")
+		val mode = if (batched) "Batch shader" else "Net reduction"
+		println("$mode parity passed for complete truth tables, idle nets, and shared drivers.")
 	} finally {
 		gpu.closeSimulation()
 	}
@@ -425,6 +427,8 @@ private fun renderBenchmark(size: Int, accelerated: Boolean, seconds: Int) {
 fun main(args: Array<String>) {
 	if (args.isNotEmpty() && args[0] == "render") {
 		renderBenchmark(args[1].toInt(), args[2] == "terni", args[3].toInt())
+	} else if (args.isNotEmpty() && args[0] == "batch") {
+		benchmarkBatches(software, args[1].toInt())
 	} else if (args.isNotEmpty() && args[0] == "benchmark") {
 		val ticks = args[2].toInt()
 		require(ticks > 0)
@@ -438,6 +442,9 @@ fun main(args: Array<String>) {
 	} else {
 		verify()
 		verifyReduction()
+		verifyReduction(batched = true)
+		verifyBatches(software)
+		verifyPreviewCadence(software)
 		verifySequentialEdges()
 		verifyBusParity(software)
 		verifyFallback()

@@ -13,6 +13,9 @@ import me.wieku.circuits.api.simulation.CircuitMetadata
 import me.wieku.circuits.api.world.IWorld
 import me.wieku.circuits.api.world.clock.AsyncClock
 import me.wieku.circuits.world.simulation.SimulationBackend
+import me.wieku.circuits.world.simulation.BatchSignalDrive
+import me.wieku.circuits.world.simulation.ClassicSimulation
+import me.wieku.circuits.world.simulation.MAX_BATCH_TICKS
 import me.wieku.circuits.world.simulation.SimulationBackends
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -31,9 +34,21 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 	internal var metadata = CircuitMetadata()
 	private var simulationClosed = false
 	val simulationStatus get() = simulation.status
+	val supportsPreviewBatches get() = simulation.supportsPreviewBatches
+	@Volatile var previewHz = 60
+		set(value) {
+			require(value == 20 || value == 60)
+			field = value
+		}
+	@Volatile var previewReadbacks = 0L
+		private set
+	private var unpublishedTicks = 0
+	private var unpublishedFrom = 0L
+	private var lastPreview: Long? = null
 
 	@Synchronized
 	fun setSimulationBackend(backend: SimulationBackend) {
+		synchronizeSimulation()
 		if (simulation !== backend) simulation.close()
 		simulation = backend
 		simulationClosed = false
@@ -46,11 +61,15 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 
 	@Synchronized
 	fun closeSimulation() {
+		synchronizeSimulation()
 		simulationClosed = true
 		simulation.close()
 	}
 
-	fun postInput(event: Any) = synchronized(this) { eventBus.post(event) }
+	fun postInput(event: Any) = synchronized(this) {
+		synchronizeSimulation()
+		eventBus.post(event)
+	}
 	val eventBus = EventBus("buttons")
 
 	var clock: AsyncClock? = null
@@ -62,15 +81,91 @@ class ClassicWorld(val width: Int, val height: Int, val name: String,
 	@Synchronized
 	override fun update(tick: Long) {
 		if (simulationClosed) return
+		synchronizeSimulation()
 		updateTasks()
+		evaluateTick(tick)
+	}
+
+	private fun evaluateTick(tick: Long) {
 		simulation.evaluate(tick, topology, tickables, manager)
 		buses.commit()
 		manager.swap()
 	}
 
 	@Synchronized
+	fun updateBatch(tick: Long, count: Int, drives: List<BatchSignalDrive> = emptyList()) {
+		require(count in 1..MAX_BATCH_TICKS)
+		require(drives.all { it.offset in 0 until count })
+		if (simulationClosed) return
+		synchronizeSimulation()
+		updateTasks()
+		if (!buses.hasElements && simulation.evaluateBatch(count, topology, tickables, manager, drives)) {
+			manager.swap()
+			return
+		}
+
+		val scheduled = drives.groupBy { it.offset }
+		repeat(count) { offset ->
+			scheduled[offset]?.forEach { it.state.setActive(it.high) }
+			evaluateTick(tick + offset)
+		}
+	}
+
+	/** Advance the editor clock. The renderer reads the last published host snapshot. */
+	@Synchronized
+	fun updatePreviewBatch(tick: Long, count: Int, now: Long = System.nanoTime(),
+		running: () -> Boolean = { true }): Int {
+		require(count in 1..MAX_BATCH_TICKS)
+		if (simulationClosed || !running()) return 0
+		updateTasks()
+		val previous = lastPreview
+		val publish = previous == null || now - previous >= 1_000_000_000L / previewHz
+		if (!buses.hasElements && simulation.evaluateBatch(count, topology, tickables, manager, emptyList(), publish)) {
+			if (publish) {
+				manager.swap()
+				unpublishedTicks = 0
+				lastPreview = now
+				previewReadbacks++
+			} else {
+				if (unpublishedTicks == 0) unpublishedFrom = tick
+				unpublishedTicks += count
+			}
+			return count
+		}
+
+		synchronizeSimulation()
+		var completed = 0
+		while (completed < count && running()) {
+			evaluateTick(tick + completed)
+			completed++
+		}
+		return completed
+	}
+
+	@Synchronized
+	fun synchronizeSimulation() {
+		if (unpublishedTicks == 0) return
+		if (simulation.synchronizeBatch(manager)) manager.swap()
+		else {
+			// Only pure combinational ticks with no external writes are left unpublished.
+			// Rebuild from the last host checkpoint if the GPU snapshot is unavailable.
+			repeat(unpublishedTicks) { offset ->
+				ClassicSimulation.evaluate(unpublishedFrom + offset, topology, tickables, manager)
+				manager.swap()
+			}
+		}
+		unpublishedTicks = 0
+		lastPreview = null
+	}
+
+	@Synchronized
 	fun updateTasks() {
-		while (true) (tasks.poll() ?: break).run()
+		val first = tasks.poll()
+		if (first != null) {
+			synchronizeSimulation()
+			first.run()
+			while (true) (tasks.poll() ?: break).run()
+		}
 		buses.refresh(this, topology)
 	}
 

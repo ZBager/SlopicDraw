@@ -14,12 +14,20 @@ constexpr uint32_t shader[] = {
 #include "evaluate.inc"
 };
 
+constexpr uint32_t batch_shader[] = {
+#include "batch.inc"
+};
+constexpr unsigned max_batch_ticks = 256;
+constexpr unsigned max_batch_drives = 4096;
+constexpr unsigned schedule_words = 3 + max_batch_ticks + max_batch_drives * 2;
+
 struct Circuit {
     std::unique_ptr<terni::ComputeRunner> runner;
     std::string device;
     std::vector<jint> signals;
     uint32_t result_count = 0;
     uint32_t readback = 0;
+    std::vector<jint> schedule;
     uint64_t ticks = 0;
     double native_ms = 0;
     double submission_ms = 0;
@@ -50,6 +58,17 @@ std::vector<jint> copy(JNIEnv* env, jintArray array) {
     if (!values.empty()) env->GetIntArrayRegion(array, 0, jsize(values.size()), values.data());
     if (env->ExceptionCheck()) throw std::runtime_error("Could not read topology");
     return values;
+}
+
+terni::DeviceInfo select_device(bool allow_software) {
+    const int selected = terni::pick_device();
+    for (const auto& candidate : terni::VulkanContext::list_devices()) {
+        if (int(candidate.index) != selected || !candidate.usable) continue;
+        if (candidate.cpu() && !allow_software)
+            throw std::runtime_error("Only software Vulkan is available");
+        return candidate;
+    }
+    throw std::runtime_error("No usable Vulkan device");
 }
 
 Circuit& circuit(jlong handle) {
@@ -96,17 +115,9 @@ JNIEXPORT jlong JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_cr
             if (net < 0 || net >= net_count) throw std::invalid_argument("Invalid net index");
         if (input_rows.empty()) input_rows.resize(4);
 
-        const int selected = terni::pick_device();
-        const auto devices = terni::VulkanContext::list_devices();
-        const terni::DeviceInfo* device = nullptr;
-        for (const auto& candidate : devices)
-            if (int(candidate.index) == selected && candidate.usable) device = &candidate;
-        if (!device) throw std::runtime_error("No usable Vulkan device");
-        if (device->cpu() && !allow_software)
-            throw std::runtime_error("Only software Vulkan is available");
-
+        const auto device = select_device(allow_software);
         auto sim = std::make_unique<Circuit>();
-        sim->device = device->type + " " + device->name;
+        sim->device = device.type + " " + device.name;
         sim->result_count = uint32_t(result_count);
         sim->signals.resize(size_t(net_count) + input_count);
         const uint64_t result_bytes = uint64_t(sim->result_count) * sizeof(jint);
@@ -125,7 +136,7 @@ JNIEXPORT jlong JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_cr
             {2, gate_count}, {3, uint32_t(net_count)}, {4, uint32_t(reduce)}
         };
         sim->runner = std::make_unique<terni::ComputeRunner>(
-            device->index, false, "", buffers, stages, reduce ? std::vector<uint32_t>{3} : std::vector<uint32_t>{}, false, constants);
+            device.index, false, "", buffers, stages, reduce ? std::vector<uint32_t>{3} : std::vector<uint32_t>{}, false, constants);
         sim->readback = sim->runner->add_tick_readback(3, result_bytes);
         return reinterpret_cast<jlong>(sim.release());
     });
@@ -184,6 +195,114 @@ JNIEXPORT jdouble JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_
             sim.compute_ms += compute;
         }
         return compute;
+    });
+}
+
+JNIEXPORT jlong JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_createBatch(
+    JNIEnv* env, jobject, jintArray gates, jintArray pins, jintArray writes,
+    jint state_count, jboolean allow_software) {
+    return checked<jlong>(env, [&] {
+        const auto gate_rows = copy(env, gates);
+        auto input_rows = copy(env, pins);
+        const auto destinations = copy(env, writes);
+        const size_t gate_count = gate_rows.size() / 5;
+        const size_t input_count = input_rows.size() / 4;
+        if (gate_count < 1 || gate_count > 256 || gate_rows.size() % 5 || input_rows.size() % 4 ||
+            destinations.size() != gate_rows.size() + input_count ||
+            state_count < 1 || state_count > 2048)
+            throw std::invalid_argument("Invalid batch circuit dimensions");
+        for (size_t i = 0; i < gate_rows.size(); ++i) {
+            const jint value = gate_rows[i];
+            if (i % 5 == 0 ? value < 0 || value > 5 : value < -1 || value >= jint(input_count))
+                throw std::invalid_argument("Invalid batch gate input");
+        }
+        for (jint pin : input_rows)
+            if (pin < -1 || pin >= state_count) throw std::invalid_argument("Invalid batch pin");
+        for (size_t i = 0; i < destinations.size(); ++i) {
+            const bool required = i >= gate_rows.size() || i % 5 == 0;
+            if (destinations[i] < (required ? 0 : -1) || destinations[i] >= state_count)
+                throw std::invalid_argument("Invalid batch destination");
+        }
+        if (input_rows.empty()) input_rows.resize(4, -1);
+
+        const auto device = select_device(allow_software);
+        auto sim = std::make_unique<Circuit>();
+        sim->result_count = uint32_t(state_count);
+        sim->signals.resize(size_t(state_count) + input_count);
+        sim->schedule.resize(schedule_words);
+        const std::vector<jint> output(state_count);
+        const uint64_t result_bytes = output.size() * sizeof(jint);
+        const std::vector<terni::ComputeBufferSpec> buffers{
+            {"gates", gate_rows.data(), gate_rows.size() * sizeof(jint)},
+            {"pins", input_rows.data(), input_rows.size() * sizeof(jint)},
+            {"destinations", destinations.data(), destinations.size() * sizeof(jint)},
+            {"initial", sim->signals.data(), sim->signals.size() * sizeof(jint)},
+            {"schedule", sim->schedule.data(), sim->schedule.size() * sizeof(jint)},
+            {"results", output.data(), result_bytes}
+        };
+        const std::vector<terni::ComputeStageSpec> stages{
+            {"batch", 1, {std::begin(batch_shader), std::end(batch_shader)}, {}}
+        };
+        const std::vector<terni::ComputeSpecConstant> constants{
+            {2, uint32_t(gate_count)}, {3, uint32_t(state_count)}
+        };
+        sim->runner = std::make_unique<terni::ComputeRunner>(
+            device.index, false, "", buffers, stages, std::vector<uint32_t>{}, false, constants);
+        sim->readback = sim->runner->add_tick_readback(5, result_bytes);
+        return reinterpret_cast<jlong>(sim.release());
+    });
+}
+
+JNIEXPORT jdouble JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_evaluateBatch(
+    JNIEnv* env, jobject, jlong handle, jintArray initial, jintArray commands, jintArray results,
+    jboolean resume, jboolean publish) {
+    return checked<jdouble>(env, [&] {
+        auto& sim = circuit(handle);
+        const auto size = env->GetArrayLength(commands);
+        if (size < 2 || size_t(size) > sim.schedule.size() ||
+            size_t(env->GetArrayLength(initial)) != sim.signals.size() ||
+            uint32_t(env->GetArrayLength(results)) != sim.result_count)
+            throw std::invalid_argument("Invalid batch array length");
+        env->GetIntArrayRegion(commands, 0, size, sim.schedule.data());
+        if (!resume) env->GetIntArrayRegion(initial, 0, jsize(sim.signals.size()), sim.signals.data());
+        if (env->ExceptionCheck()) return 0.0;
+        const auto ticks = sim.schedule[0];
+        const auto drives = sim.schedule[1];
+        if (ticks < 1 || ticks > jint(max_batch_ticks) || drives < 0 || drives > jint(max_batch_drives) ||
+            size != (drives == 0 ? 2 : 3 + ticks + 2 * drives))
+            throw std::invalid_argument("Invalid batch schedule");
+        if (drives > 0) {
+            if (sim.schedule[2] != 0 || sim.schedule[2 + ticks] != drives)
+                throw std::invalid_argument("Invalid batch schedule offsets");
+            for (int i = 0; i < ticks; ++i)
+                if (sim.schedule[2 + i] > sim.schedule[3 + i])
+                    throw std::invalid_argument("Invalid batch schedule order");
+            for (int i = 3 + ticks; i < size; i += 2)
+                if (sim.schedule[i] < 0 || uint32_t(sim.schedule[i]) >= sim.result_count ||
+                    (sim.schedule[i + 1] != 2 && sim.schedule[i + 1] != 3))
+                    throw std::invalid_argument("Invalid batch schedule drive");
+        }
+        if (resume) sim.schedule[0] |= 0x10000;
+        else sim.runner->queue_write(3, sim.signals.data(), sim.signals.size() * sizeof(jint));
+        sim.runner->queue_write(4, sim.schedule.data(), uint64_t(size) * sizeof(jint));
+        sim.runner->set_tick_readback_bytes(sim.readback, publish ? sim.result_count * sizeof(jint) : 0);
+        sim.runner->tick();
+        if (publish) env->SetIntArrayRegion(results, 0, jsize(sim.result_count),
+                                           static_cast<const jint*>(sim.runner->tick_readback(sim.readback)));
+        return sim.runner->last_tick_gpu_ms();
+    });
+}
+
+JNIEXPORT void JNICALL Java_me_wieku_circuits_desktop_simulation_TerniNative_readBatch(
+    JNIEnv* env, jobject, jlong handle, jintArray results) {
+    checked<bool>(env, [&] {
+        auto& sim = circuit(handle);
+        if (uint32_t(env->GetArrayLength(results)) != sim.result_count)
+            throw std::invalid_argument("Invalid batch snapshot length");
+        // Reuse the input staging allocation. Only the state prefix is read.
+        sim.runner->read(5, sim.signals.data(), sim.result_count * sizeof(jint));
+        env->SetIntArrayRegion(results, 0, jsize(sim.result_count), sim.signals.data());
+        return true;
     });
 }
 

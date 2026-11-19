@@ -1,0 +1,97 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "terni/compute.glsl"
+
+// The host dispatches exactly one workgroup. Keep these limits in sync with the JNI bridge.
+layout(constant_id = 2) const uint gateCount = 0;
+layout(constant_id = 3) const uint stateCount = 0;
+layout(std430, binding = 0) readonly buffer GateRows { int gates[]; };
+layout(std430, binding = 1) readonly buffer InputPins { int pins[]; };
+layout(std430, binding = 2) readonly buffer Destinations { int writes[]; };
+layout(std430, binding = 3) readonly buffer Initial { uint initial[]; };
+layout(std430, binding = 4) readonly buffer Schedule { uint schedule[]; };
+layout(std430, binding = 5) buffer Result { uint results[]; };
+
+shared uint current[2048];
+shared uint flags[2048];
+
+uint level(int index) {
+    return index < 0 ? 0u : current[index];
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint base = lane * 5;
+    int op = 0;
+    ivec4 sources[4];
+    ivec4 indicators = ivec4(-1);
+    ivec4 sinks = ivec4(-1);
+    uvec4 inverted = uvec4(0);
+    int self = -1;
+    if (lane < gateCount) {
+        op = gates[base];
+        self = writes[base];
+        for (uint pin = 0; pin < 4; ++pin) {
+            int inputRow = gates[base + 1 + pin];
+            sinks[pin] = writes[base + 1 + pin];
+            if (inputRow < 0) continue;
+            uint start = uint(inputRow) * 4;
+            sources[pin] = ivec4(pins[start], pins[start + 1], pins[start + 2], pins[start + 3]);
+            indicators[pin] = writes[gateCount * 5 + uint(inputRow)];
+            inverted[pin] = initial[stateCount + uint(inputRow)];
+        }
+    }
+
+    bool resume = (schedule[0] & 0x10000u) != 0;
+    for (uint i = lane; i < stateCount; i += gl_WorkGroupSize.x) {
+        uint value = initial[i];
+        current[i] = resume ? results[i] : value & 1u;
+        // An external write before a fresh batch may have already marked this wire driven.
+        flags[i] = !resume && (value & 4u) != 0 ? 2u | ((value >> 1) & 1u) : 0u;
+    }
+    workgroup_sync();
+
+    uint ticks = schedule[0] & 0xffffu;
+    bool hasDrives = schedule[1] != 0;
+    for (uint tick = 0; tick < ticks; ++tick) {
+        if (hasDrives) {
+            uint start = schedule[2 + tick];
+            uint end = schedule[3 + tick];
+            uint records = 3 + ticks;
+            for (uint i = start + lane; i < end; i += gl_WorkGroupSize.x) {
+                atomicOr(flags[schedule[records + i * 2]], schedule[records + i * 2 + 1]);
+            }
+        }
+        if (self >= 0) {
+            bool all = op < 2;
+            bool parity = op >= 4;
+            bool value = all && indicators[0] >= 0;
+            for (uint pin = 0; pin < 4; ++pin) {
+                int indicator = indicators[pin];
+                if (indicator < 0 || (!parity && value != all)) break;
+                ivec4 src = sources[pin];
+                uint high = level(src.x) | level(src.y) | level(src.z) | level(src.w);
+                bool pinHigh = (high ^ inverted[pin]) != 0;
+                atomicOr(flags[indicator], 2u | uint(pinHigh));
+                value = parity ? value != pinHigh : pinHigh;
+            }
+
+            uint driven = 2u | uint(value != ((op & 1) != 0));
+            atomicOr(flags[self], driven);
+            for (uint pin = 0; pin < 4; ++pin) {
+                if (sinks[pin] >= 0) atomicOr(flags[sinks[pin]], driven);
+            }
+        }
+        workgroup_sync();
+
+        for (uint i = lane; i < stateCount; i += gl_WorkGroupSize.x) {
+            uint writesThisTick = flags[i];
+            if (writesThisTick != 0) current[i] = writesThisTick & 1u;
+            else if (tick == 0 && !resume) current[i] = (initial[i] >> 1) & 1u;
+            flags[i] = 0;
+        }
+        workgroup_sync();
+    }
+
+    for (uint i = lane; i < stateCount; i += gl_WorkGroupSize.x) results[i] = current[i];
+}

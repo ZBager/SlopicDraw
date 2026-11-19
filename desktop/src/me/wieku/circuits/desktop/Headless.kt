@@ -7,26 +7,33 @@ private data class Probe(val x: Int, val y: Int, val port: Circuit.Port, val bit
 
 internal fun runHeadless(args: Array<String>) {
 	require(args.size >= 2) {
-		"Usage: --headless MAP TICKS [--read X,Y,h|v] [--drive X,Y,h|v,0|1] [--read-bus X,Y,h|v,BIT] [--tap X,Y,BIT] [--save MAP | --save-legacy MAP]"
+		"Usage: --headless MAP TICKS [--read X,Y,h|v] [--drive X,Y,h|v,0|1] [--read-bus X,Y,h|v,BIT] [--tap X,Y,BIT] [--batch] [--save MAP | --save-legacy MAP]"
 	}
 	val ticks = args[1].toInt()
 	require(ticks >= 0)
 	val probes = ArrayList<Probe>()
 	var destination: File? = null
 	var legacy = false
+	var batched = false
 	Circuit.open(File(args[0])).use { circuit ->
-		for (index in 2 until args.size step 2) {
-			require(index + 1 < args.size) { "Missing value for ${args[index]}." }
-			val value = args[index + 1]
-			when (args[index]) {
+		var index = 2
+		while (index < args.size) {
+			val option = args[index++]
+			if (option == "--batch") {
+				batched = true
+				continue
+			}
+			require(index < args.size) { "Missing value for $option." }
+			val value = args[index++]
+			when (option) {
 				"--tap" -> {
 					val parts = value.split(',')
 					require(parts.size == 3) { "Expected x,y,bit." }
 					circuit.setBusTapBit(parts[0].toInt(), parts[1].toInt(), parts[2].toInt())
 				}
 				"--read", "--drive", "--read-bus" -> {
-					val drive = args[index] == "--drive"
-					val bus = args[index] == "--read-bus"
+					val drive = option == "--drive"
+					val bus = option == "--read-bus"
 					val parts = value.split(',')
 					require(parts.size == if (drive || bus) 4 else 3) { "Invalid signal coordinates." }
 					val x = parts[0].toInt()
@@ -43,12 +50,12 @@ internal fun runHeadless(args: Array<String>) {
 				}
 				"--save", "--save-legacy" -> {
 					destination = File(value)
-					legacy = args[index] == "--save-legacy"
+					legacy = option == "--save-legacy"
 				}
-				else -> throw IllegalArgumentException("Unknown headless option ${args[index]}.")
+				else -> throw IllegalArgumentException("Unknown headless option $option.")
 			}
 		}
-		repeat(ticks) { circuit.step() }
+		if (batched) circuit.stepBatch(ticks) else repeat(ticks) { circuit.step() }
 		for ((x, y, port, bit) in probes) {
 			val result = if (bit == null) circuit.read(x, y, port) else circuit.readBus(x, y, port, bit)
 			val lane = if (bit == null) "" else " bit $bit"

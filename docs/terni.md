@@ -36,6 +36,14 @@ CMake fetches [Terni at revision `7b2e534b2b80a147f903c6d85f09806ffd17e318`](htt
 
 The desktop distribution JAR accepts the same JVM properties before `-jar`. The native library can be specified by an absolute path or found with `java.library.path` when `logicdraw.terni.library` is omitted. If the bridge, driver, or native tick fails, LogicDraw reports the reason and uses Classic in that world. Reopen the project to retry. Add `-Dlogicdraw.terni.software=true` to permit a CPU Vulkan device for testing. The title identifies the device type, backend mode, sampled net count, accelerated gate count, simulation time and GPU compute time. It also shows the editor's current tick rate, FPS, and total allocated state nodes.
 
+
+For small circuits eligible for batched Terni, open the gear icon next to
+the clock controls and set **Terni preview refresh** to **20 Hz** or **60 Hz**.
+This limits routine GPU readbacks independently of the **Tickrate** field.
+The preview can miss activity between snapshots. Pausing and stepping
+synchronize exact state. See the [performance plan](simulation-performance-plan.md)
+for batch limits and behavior.
+
 ## How it works
 
 LogicDraw owns the world, clock, topology, signal buffers and component state. The backend executes the evaluation phase of a tick. The same world code applies queued edits before evaluation and commits the next-state buffer after it. Input events, settings edits and saves synchronize with ticks. Closing the editor releases its runner.

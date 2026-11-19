@@ -21,14 +21,18 @@ FetchContent_Declare(terni
   GIT_TAG 7b2e534b2b80a147f903c6d85f09806ffd17e318)
 FetchContent_MakeAvailable(terni)
 
-set(shader_header "${CMAKE_CURRENT_BINARY_DIR}/evaluate.inc")
-add_custom_command(OUTPUT "${shader_header}"
-  COMMAND "${GLSLC}" --target-env=vulkan1.3 -O -mfmt=num "-I${terni_SOURCE_DIR}/shaders"
-          "${CMAKE_CURRENT_SOURCE_DIR}/evaluate.comp" -o "${shader_header}"
-  DEPENDS evaluate.comp "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
-  VERBATIM)
+set(shader_headers)
+foreach(shader IN ITEMS evaluate batch)
+  set(header "${CMAKE_CURRENT_BINARY_DIR}/${shader}.inc")
+  add_custom_command(OUTPUT "${header}"
+    COMMAND "${GLSLC}" --target-env=vulkan1.3 -O -mfmt=num "-I${terni_SOURCE_DIR}/shaders"
+            "${CMAKE_CURRENT_SOURCE_DIR}/${shader}.comp" -o "${header}"
+    DEPENDS "${shader}.comp" "${terni_SOURCE_DIR}/shaders/terni/compute.glsl"
+    VERBATIM)
+  list(APPEND shader_headers "${header}")
+endforeach()
 
-add_library(logicdraw_terni SHARED bridge.cpp "${shader_header}")
+add_library(logicdraw_terni SHARED bridge.cpp ${shader_headers})
 target_link_libraries(logicdraw_terni PRIVATE Terni::runtime)
 target_include_directories(logicdraw_terni PRIVATE ${JNI_INCLUDE_DIRS} "${CMAKE_CURRENT_BINARY_DIR}")
 set_target_properties(logicdraw_terni PROPERTIES CXX_VISIBILITY_PRESET hidden)

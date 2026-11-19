@@ -55,7 +55,8 @@ class WorldClipboard private constructor(private val objects: Array2D<Class<out 
 	}
 
 	companion object {
-		fun create(selection: Rectangle, world: ClassicWorld): WorldClipboard {
+		fun create(selection: Rectangle, world: ClassicWorld): WorldClipboard = synchronized(world) {
+			world.synchronizeSimulation()
 			val map = Array2D<Class<out IElement>?>(selection.width, selection.height)
 			val data = Array2D<HashMap<String, Any>?>(selection.width, selection.height)
 			for(x in 0 until selection.width) {
@@ -67,7 +68,7 @@ class WorldClipboard private constructor(private val objects: Array2D<Class<out 
 					}
 				}
 			}
-			return WorldClipboard(map, data)
+			WorldClipboard(map, data)
 		}
 	}
 

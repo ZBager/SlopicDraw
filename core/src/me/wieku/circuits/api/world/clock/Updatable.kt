@@ -3,6 +3,11 @@ package me.wieku.circuits.api.world.clock
 interface Updatable<in T:Number> {
 
 	interface ByTick:Updatable<Long>
+
+	interface ByTickBatch : ByTick {
+		fun ticksPerCall(tickRate: Int): Int
+		fun advance(tick: Long, count: Int, running: () -> Boolean): Int
+	}
 	interface ByDelta:Updatable<Float>
 
 	fun update(value: T)

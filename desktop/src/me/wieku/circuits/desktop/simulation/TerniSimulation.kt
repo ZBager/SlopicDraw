@@ -10,6 +10,7 @@ import me.wieku.circuits.world.elements.gates.*
 import me.wieku.circuits.world.elements.io.Controller
 import me.wieku.circuits.world.elements.io.Input
 import me.wieku.circuits.world.simulation.ClassicSimulation
+import me.wieku.circuits.world.simulation.BatchSignalDrive
 import me.wieku.circuits.world.simulation.SimulationBackend
 import java.io.File
 import java.util.IdentityHashMap
@@ -24,6 +25,11 @@ internal object TerniNative {
 
 	external fun create(gates: IntArray, inputNets: IntArray, netCount: Int,
 		writes: IntArray, resultCount: Int, allowSoftware: Boolean): Long
+	external fun createBatch(gates: IntArray, inputPins: IntArray, writes: IntArray,
+		stateCount: Int, allowSoftware: Boolean): Long
+	external fun evaluateBatch(handle: Long, initial: IntArray, commands: IntArray, results: IntArray,
+		resume: Boolean, publish: Boolean): Double
+	external fun readBatch(handle: Long, results: IntArray)
 	external fun describe(handle: Long): String
 	external fun report(handle: Long): String
 	external fun evaluate(handle: Long, signals: IntArray, results: IntArray, checkOrder: Boolean): Double
@@ -47,12 +53,7 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		var compiled: Circuit? = null
 		if (failure == null) {
 			try {
-				if (revision != topology) {
-					close()
-					circuit = compile(gates)
-					revision = topology
-				}
-				compiled = circuit
+				compiled = prepare(topology, gates)
 				if (compiled != null) compiled.dispatch(states, checkOrder)
 			} catch (error: LinkageError) {
 				fail(error)
@@ -72,6 +73,60 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		}
 	}
 
+	override val supportsPreviewBatches get() = true
+
+	override fun evaluateBatch(count: Int, topology: Long, gates: MappedArray<Vector2i, ITickable>,
+		states: StateManager, drives: List<BatchSignalDrive>, publish: Boolean): Boolean {
+		if (failure != null || gates.currentElements > 256) return false
+		val compiled = try {
+			prepare(topology, gates)
+		} catch (error: LinkageError) {
+			fail(error)
+			return false
+		} catch (error: Exception) {
+			fail(error)
+			return false
+		} ?: return false
+		val batch = compiled.batch ?: return false
+		val result = try {
+			batch.dispatch(count, states, drives, allowSoftware, publish)
+		} catch (error: LinkageError) {
+			batch.disable(error)
+			return false
+		} catch (error: Exception) {
+			batch.disable(error)
+			return false
+		}
+		if (!result) return false
+		if (publish) batch.apply(states)
+		status = compiled.batchStatus
+		compiled.reported = false
+		compiled.resetTiming()
+		return true
+	}
+
+	override fun synchronizeBatch(states: StateManager): Boolean {
+		val batch = circuit?.batch ?: return false
+		return try {
+			batch.synchronize(states)
+		} catch (error: LinkageError) {
+			batch.disable(error)
+			false
+		} catch (error: Exception) {
+			batch.disable(error)
+			false
+		}
+	}
+
+	private fun prepare(topology: Long, gates: MappedArray<Vector2i, ITickable>): Circuit? {
+		if (revision != topology) {
+			close()
+			circuit = compile(gates)
+			revision = topology
+		}
+		return circuit
+	}
+
 	private fun fail(error: Throwable) {
 		close()
 		failure = error.message ?: error.javaClass.simpleName
@@ -80,7 +135,10 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 	}
 
 	override fun close() {
-		circuit?.let { TerniNative.destroy(it.handle) }
+		circuit?.let {
+			it.batch?.close()
+			TerniNative.destroy(it.handle)
+		}
 		circuit = null
 		revision = -1L
 		status = if (failure == null) "Classic (Terni pending)" else "Classic (Terni fallback: $failure)"
@@ -133,6 +191,10 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 		}
 
 		val reductions = if (accelerated.size == gates.currentElements) reductions(accelerated, inputRows) else null
+		val sampled = netSlots.keys.toIntArray()
+		val terminals = inputRows.toTypedArray()
+		val batch = if (reductions != null && accelerated.size <= 256)
+			BatchPlan.create(rows, inputNets, reductions, sampled, terminals) else null
 		val start = System.nanoTime()
 		TerniNative.load()
 		val handle = TerniNative.create(rows, inputNets, netSlots.size + 1,
@@ -142,7 +204,7 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 				accelerated.size,
 				if (reductions == null) accelerated.toTypedArray() else emptyArray(),
 				if (reductions == null) slots.toIntArray() else IntArray(0),
-				inputRows.toTypedArray(), netSlots.keys.toIntArray(), reductions?.states, reductions?.privateCount ?: 0)
+				terminals, sampled, reductions?.states, reductions?.privateCount ?: 0, batch)
 		} catch (error: Throwable) {
 			TerniNative.destroy(handle)
 			throw error
@@ -184,6 +246,95 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 
 	private class Reductions(val writes: IntArray, val states: Array<State>, val privateCount: Int)
 
+	private class BatchPlan(private val gates: IntArray, private val pins: IntArray, private val writes: IntArray,
+		private val stateIds: IntArray, private val slots: Map<Int, Int>, private val inputs: Array<Input>,
+		private val privateCount: Int) {
+		private var handle = 0L
+		private var disabled = false
+		private var resident = false
+		private val initial = IntArray(stateIds.size + inputs.size)
+		private val results = IntArray(stateIds.size)
+		private val emptySchedule = IntArray(2)
+
+		fun dispatch(count: Int, states: StateManager, drives: List<BatchSignalDrive>,
+			allowSoftware: Boolean, publish: Boolean): Boolean {
+			if (disabled || drives.size > 4096) return false
+			val schedule = if (drives.isEmpty()) {
+				emptySchedule[0] = count
+				emptySchedule
+			} else {
+				val records = IntArray(3 + count + drives.size * 2)
+				records[0] = count
+				records[1] = drives.size
+				var written = 0
+				val scheduled = drives.groupBy { it.offset }
+				for (tick in 0 until count) {
+					records[2 + tick] = written
+					for (drive in scheduled[tick] ?: emptyList()) {
+						val slot = slots[drive.state.id] ?: return false
+						if (slot < privateCount) return false
+						val base = 3 + count + written++ * 2
+						records[base] = slot
+						records[base + 1] = if (drive.high) 3 else 2
+					}
+				}
+				records[2 + count] = written
+				records
+			}
+			if (handle == 0L) handle = TerniNative.createBatch(gates, pins, writes, stateIds.size, allowSoftware)
+			if (!resident) {
+				for (i in stateIds.indices) {
+					val id = stateIds[i]
+					initial[i] = (if (states[id]) 1 else 0) or
+						(if (states.getDirty(id)) 2 else 0) or
+						(if (i >= privateCount && states.used[id] > 0) 4 else 0)
+				}
+				for (i in inputs.indices) initial[stateIds.size + i] = if (inputs[i].inverted) 1 else 0
+			}
+			TerniNative.evaluateBatch(handle, initial, schedule, results, resident, publish)
+			resident = !publish
+			return true
+		}
+
+		fun synchronize(states: StateManager): Boolean {
+			if (!resident) return false
+			TerniNative.readBatch(handle, results)
+			apply(states)
+			resident = false
+			return true
+		}
+
+		fun apply(states: StateManager) {
+			for (i in stateIds.indices) states[stateIds[i]] = results[i] != 0
+		}
+
+		fun disable(error: Throwable) {
+			close()
+			disabled = true
+			System.err.println("Terni batch unavailable: ${error.message}")
+		}
+
+		fun close() {
+			if (handle != 0L) TerniNative.destroy(handle)
+			handle = 0L
+			resident = false
+		}
+
+		companion object {
+			fun create(rows: IntArray, inputNets: IntArray, reductions: Reductions,
+				sampled: IntArray, inputs: Array<Input>): BatchPlan? {
+				val states = LinkedHashMap<Int, Int>()
+				for (state in reductions.states) states[state.id] = states.size
+				val netSlots = IntArray(sampled.size + 1) { -1 }
+				for (i in sampled.indices) netSlots[i + 1] = states.getOrPut(sampled[i]) { states.size }
+				if (states.size > 2048) return null
+				val pins = IntArray(inputNets.size) { netSlots[inputNets[it]] }
+				return BatchPlan(rows, pins, reductions.writes, states.keys.toIntArray(),
+					states, inputs, reductions.privateCount)
+			}
+		}
+	}
+
 	private fun opcode(gate: ITickable?) = when (gate) {
 		is AndGate -> 0
 		is NandGate -> 1
@@ -196,13 +347,14 @@ internal class TerniSimulation(private val allowSoftware: Boolean, private val c
 
 	private class Circuit(val handle: Long, val device: String, val initializeMs: Double, val gateCount: Int,
 		private val gates: Array<SaveableGate>, private val slots: IntArray, private val inputs: Array<Input>,
-		private val nets: IntArray, private val resultStates: Array<State>?, private val privateCount: Int) {
+		private val nets: IntArray, private val resultStates: Array<State>?, private val privateCount: Int,
+		val batch: BatchPlan?) {
 		private val signals = IntArray(1 + nets.size + inputs.size)
 		private val results = IntArray(resultStates?.size ?: gateCount)
 		private var gpuMs = 0.0
 		private var start = 0L
 		var reported = false
-			private set
+		val batchStatus = "Terni $device (batched) | $gateCount gates"
 		private val timing = DoubleArray(120)
 		var samples = 0
 			private set

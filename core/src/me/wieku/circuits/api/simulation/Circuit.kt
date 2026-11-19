@@ -7,12 +7,17 @@ import me.wieku.circuits.world.ClassicWorld
 import me.wieku.circuits.world.ElementRegistry
 import me.wieku.circuits.world.elements.bus.BusWire
 import me.wieku.circuits.world.elements.bus.BusTap
+import me.wieku.circuits.world.simulation.BatchSignalDrive
+import me.wieku.circuits.world.simulation.MAX_BATCH_TICKS
 import java.io.Closeable
 import java.io.File
 
 /** A headless circuit. The caller owns scheduling and may step one tick at a time. */
 class Circuit private constructor(private val world: ClassicWorld) : Closeable {
 	enum class Port { HORIZONTAL, VERTICAL }
+
+	/** Apply this write immediately before the tick at the zero-based offset. */
+	data class TimedDrive(val offset: Int, val x: Int, val y: Int, val port: Port, val high: Boolean)
 
 	val width get() = world.width
 	val height get() = world.height
@@ -64,6 +69,26 @@ class Circuit private constructor(private val world: ClassicWorld) : Closeable {
 	fun step() = access {
 		world.update(ticks)
 		ticks++
+	}
+
+	/** Advance without intermediate observations. Unsupported circuits step normally. */
+	fun stepBatch(count: Int, drives: List<TimedDrive> = emptyList()) = access {
+		require(count >= 0)
+		require(drives.all { it.offset in 0 until count })
+		if (count == 0) return@access
+		if (drives.isNotEmpty()) world.updateTasks()
+		val scheduled = drives.map {
+			val state = world.getElement(Vector2i(it.x, it.y))?.getState(it.port.axis())
+				?: throw IllegalArgumentException("No signal at (${it.x}, ${it.y}).")
+			it.offset / MAX_BATCH_TICKS to BatchSignalDrive(it.offset % MAX_BATCH_TICKS, state, it.high)
+		}.groupBy({ it.first }, { it.second })
+		var completed = 0
+		while (completed < count) {
+			val length = minOf(MAX_BATCH_TICKS, count - completed)
+			world.updateBatch(ticks, length, scheduled[completed / MAX_BATCH_TICKS] ?: emptyList())
+			ticks += length
+			completed += length
+		}
 	}
 
 	fun save(file: File, legacy: Boolean = false) = access {
